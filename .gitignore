@@ -1,0 +1,17 @@
+# Dependencias
+node_modules/
+
+# Build de Rust / Tauri
+src-tauri/target/
+
+# Iconos generados por `tauri icon` (se regeneran desde app-icon.png)
+src-tauri/icons/*.png
+src-tauri/icons/*.ico
+src-tauri/icons/*.icns
+!src-tauri/icons/.gitkeep
+
+# Esquemas/IPC generados por Tauri
+src-tauri/gen/
+
+# Sistema
+.DS_Store

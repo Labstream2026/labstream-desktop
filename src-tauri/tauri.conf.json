@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Labstream OS",
+  "version": "1.0.0",
+  "identifier": "co.labstream.os",
+  "build": {
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Labstream OS",
+        "url": "https://os.labstreamsas.com",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 700,
+        "resizable": true,
+        "center": true,
+        "decorations": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "Labstream SAS",
+    "category": "Productivity",
+    "shortDescription": "Espacio de trabajo de Labstream",
+    "longDescription": "Cliente de escritorio de Labstream OS para Windows. Abre el espacio de trabajo de Labstream en su propia ventana.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["Spanish", "SpanishInternational", "English"]
+      }
+    }
+  }
+}

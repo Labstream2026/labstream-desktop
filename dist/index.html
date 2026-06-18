@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Labstream OS</title>
+    <style>
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: #6366f1;
+        color: #fff;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+      }
+      .box { max-width: 420px; padding: 24px; }
+      h1 { font-size: 20px; font-weight: 600; margin: 0 0 8px; }
+      p { opacity: 0.85; font-size: 14px; line-height: 1.5; margin: 0; }
+      .spinner {
+        width: 28px; height: 28px; margin: 0 auto 20px;
+        border: 3px solid rgba(255,255,255,0.35);
+        border-top-color: #fff; border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <!--
+      Pantalla de respaldo. En condiciones normales la ventana carga directamente
+      el servidor del NAS (app.windows[].url en tauri.conf.json), así que este
+      archivo casi nunca se ve. Solo aparece si se cambia la config para arrancar
+      en local. Es obligatorio porque Tauri exige un frontendDist existente.
+    -->
+    <div class="box">
+      <div class="spinner"></div>
+      <h1>Labstream OS</h1>
+      <p>Conectando con el espacio de trabajo…</p>
+    </div>
+  </body>
+</html>

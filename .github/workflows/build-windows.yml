@@ -1,0 +1,57 @@
+name: Build instalador Windows
+
+# Se dispara al publicar una etiqueta de versión (ej. v1.0.0) y también
+# a mano desde la pestaña Actions (workflow_dispatch) para pruebas.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # necesario para crear/actualizar el Release con el .exe
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Clonar repo
+        uses: actions/checkout@v4
+
+      - name: Instalar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalar Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache de Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Generar iconos
+        run: npm run icons
+
+      - name: Construir instalador
+        run: npm run tauri build
+
+      - name: Publicar instalador en el Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Subir instalador como artefacto (para pruebas sin tag)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: labstream-os-setup
+          path: src-tauri/target/release/bundle/nsis/*-setup.exe
