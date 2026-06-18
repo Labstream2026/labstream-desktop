@@ -1,4 +1,4 @@
-name: Build instalador Windows
+name: Build instaladores (Windows + macOS)
 
 # Se dispara al publicar una etiqueta de versión (ej. v1.0.0) y también
 # a mano desde la pestaña Actions (workflow_dispatch) para pruebas.
@@ -9,11 +9,28 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # necesario para crear/actualizar el Release con el .exe
+  contents: write # necesario para crear/actualizar el Release con los instaladores
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows → instalador .exe (NSIS)
+          - platform: windows-latest
+            rust_targets: ""
+            build_args: "--bundles nsis"
+            artifact_glob: "src-tauri/target/release/bundle/nsis/*-setup.exe"
+            artifact_name: labstream-os-windows
+          # macOS → .dmg universal (Intel + Apple Silicon)
+          - platform: macos-latest
+            rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+            build_args: "--target universal-apple-darwin --bundles dmg"
+            artifact_glob: "src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg"
+            artifact_name: labstream-os-macos
+
+    runs-on: ${{ matrix.platform }}
     steps:
       - name: Clonar repo
         uses: actions/checkout@v4
@@ -25,6 +42,8 @@ jobs:
 
       - name: Instalar Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
 
       - name: Cache de Rust
         uses: Swatinem/rust-cache@v2
@@ -38,14 +57,13 @@ jobs:
         run: npm run icons
 
       - name: Construir instalador
-        run: npm run tauri build
+        run: npm run tauri build -- ${{ matrix.build_args }}
 
       - name: Publicar instalador en el Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            src-tauri/target/release/bundle/nsis/*-setup.exe
+          files: ${{ matrix.artifact_glob }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -53,5 +71,5 @@ jobs:
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
         with:
-          name: labstream-os-setup
-          path: src-tauri/target/release/bundle/nsis/*-setup.exe
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_glob }}

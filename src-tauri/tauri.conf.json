@@ -28,7 +28,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": "all",
     "publisher": "Labstream SAS",
     "category": "Productivity",
     "shortDescription": "Espacio de trabajo de Labstream",
@@ -45,6 +45,9 @@
         "installMode": "currentUser",
         "languages": ["Spanish", "SpanishInternational", "English"]
       }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
     }
   }
 }
