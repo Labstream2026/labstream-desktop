@@ -4,6 +4,8 @@
 //   - plugin `opener`: enlaces externos abren el navegador del sistema.
 //   - plugin `notification`: la web (vía window.__TAURI__) muestra avisos nativos.
 //   - plugin `autostart`: la app arranca al iniciar sesión.
+//   - plugin `updater`: al abrir, busca una versión nueva en los Releases de GitHub
+//     (firmada) y, si la hay, la instala sola y reinicia.
 //   - bandeja (tray) + "cerrar = ocultar": la app sigue corriendo y notificando
 //     aunque cierres la ventana.
 //   - la ventana se crea AQUÍ (no en tauri.conf.json) para poder inyectar un script
@@ -59,11 +61,30 @@ fn show_main<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+// Busca e instala una actualización en segundo plano (best-effort, no molesta al usuario).
+// Compara con el `latest.json` publicado en los Releases de GitHub; si hay una versión más
+// nueva y firmada con nuestra clave, la descarga, la instala y reinicia la app. Si no hay
+// red o no hay actualización, no hace nada.
+#[cfg(desktop)]
+async fn check_update(handle: tauri::AppHandle) {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = match handle.updater() {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+    if let Ok(Some(update)) = updater.check().await {
+        if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
+            handle.restart();
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
@@ -71,6 +92,13 @@ pub fn run() {
         .setup(|app| {
             // Arranque automático al iniciar sesión (idempotente).
             let _ = app.autolaunch().enable();
+
+            // Al abrir, busca una actualización en segundo plano (no bloquea el arranque).
+            #[cfg(desktop)]
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(check_update(handle));
+            }
 
             // Ventana principal: carga el servidor del NAS. Se crea aquí (no en el config) para
             // poder inyectar el script de enlaces externos y permitir las descargas.

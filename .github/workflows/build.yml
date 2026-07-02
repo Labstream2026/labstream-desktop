@@ -1,7 +1,8 @@
-name: Build instaladores (Windows + macOS)
+name: Publicar app de escritorio (Windows + macOS)
 
-# Se dispara al publicar una etiqueta de versión (ej. v1.0.0) y también
-# a mano desde la pestaña Actions (workflow_dispatch) para pruebas.
+# Se dispara al publicar una etiqueta de versión (ej. v1.0.0) y también a mano desde la
+# pestaña Actions (workflow_dispatch). Construye el .exe (Windows) y el .dmg universal
+# (macOS), los firma para el updater y publica todo —incluido latest.json— en un Release.
 on:
   push:
     tags:
@@ -9,26 +10,20 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # necesario para crear/actualizar el Release con los instaladores
+  contents: write # crear/actualizar el Release con los instaladores
 
 jobs:
-  build:
+  publish:
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Windows → instalador .exe (NSIS)
-          - platform: windows-latest
-            rust_targets: ""
-            build_args: "--bundles nsis"
-            artifact_glob: "src-tauri/target/release/bundle/nsis/*-setup.exe"
-            artifact_name: labstream-os-windows
           # macOS → .dmg universal (Intel + Apple Silicon)
           - platform: macos-latest
-            rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
-            build_args: "--target universal-apple-darwin --bundles dmg"
-            artifact_glob: "src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg"
-            artifact_name: labstream-os-macos
+            args: "--target universal-apple-darwin"
+          # Windows → instalador .exe (NSIS)
+          - platform: windows-latest
+            args: ""
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -43,33 +38,31 @@ jobs:
       - name: Instalar Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.rust_targets }}
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Cache de Rust
-        uses: Swatinem/rust-cache@v2
+        uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
       - name: Instalar dependencias
         run: npm install
 
-      - name: Generar iconos
+      - name: Generar iconos (desde app-icon.png)
         run: npm run icons
 
-      - name: Construir instalador
-        run: npm run tauri build -- ${{ matrix.build_args }}
-
-      - name: Publicar instalador en el Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ matrix.artifact_glob }}
+      - name: Construir, firmar y publicar
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Subir instalador como artefacto (para pruebas sin tag)
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        uses: actions/upload-artifact@v4
+          # Firma del updater: la clave privada y su contraseña van como secrets del repo.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.artifact_glob }}
+          # En un tag usa su nombre (v1.0.0); en ejecución manual, deriva vX.Y.Z de la versión.
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
+          releaseName: "Labstream OS Desktop __VERSION__"
+          releaseBody: "Instaladores de escritorio de Labstream OS.\n\n- Windows: el archivo `.exe` (NSIS).\n- macOS: el archivo `.dmg` universal (Intel + Apple Silicon).\n\nActualización automática activada: las apps ya instaladas se actualizan solas al publicar una versión nueva."
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

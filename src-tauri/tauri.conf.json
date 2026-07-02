@@ -13,9 +13,18 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Labstream2026/labstream-desktop/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERDNjE5MUE3NjlGRUMxRjEKUldUeHdmNXBwNUZoM05sZ1lSTDVaalJ6NGU2NUNEQUF3Z211SnhhU0EvWm1VREdlVnM0N0pHS00K"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "publisher": "Labstream SAS",
     "category": "Productivity",
     "shortDescription": "Espacio de trabajo de Labstream",
