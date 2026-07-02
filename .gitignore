@@ -8,6 +8,8 @@ src-tauri/target/
 src-tauri/icons/*.png
 src-tauri/icons/*.ico
 src-tauri/icons/*.icns
+src-tauri/icons/android/
+src-tauri/icons/ios/
 !src-tauri/icons/.gitkeep
 
 # Esquemas/IPC generados por Tauri

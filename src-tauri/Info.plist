@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Textos que macOS muestra al pedir permiso. Tauri fusiona este Info.plist en el bundle. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Labstream usa el micrófono para grabar notas de voz en el chat.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Labstream usa la cámara para adjuntar fotos y video en el chat.</string>
+</dict>
+</plist>

@@ -8,8 +8,16 @@ que carga el servidor de Labstream OS que corre en el NAS
 No contiene la app: el backend, la base de datos, OnlyOffice, etc. siguen en el
 NAS. Esto solo le da al equipo un ícono y una ventana propia en Windows y Mac.
 
-El servidor objetivo se configura en `src-tauri/tauri.conf.json` →
-`app.windows[0].url`.
+Además del ícono y la ventana, el envoltorio añade comportamiento de cliente nativo:
+
+- **Enlaces externos** (Drive, documentos ajenos…) abren en el **navegador del sistema**;
+  la navegación del propio servidor y el **login por Authentik** se quedan dentro.
+- **Notas de voz / cámara**: pide permiso de micrófono y cámara (entitlements de macOS).
+- **Descargas** (entregables, exportaciones) con el diálogo nativo de guardado.
+- **Bandeja del sistema**: cerrar la ventana la oculta; la app sigue notificando.
+- **Arranque automático** al iniciar sesión y **sesión persistente** (no re-loguea).
+
+El servidor objetivo se configura en `src-tauri/src/lib.rs` → constante `SERVER_URL`.
 
 Salidas:
 
@@ -152,11 +160,13 @@ labstream-desktop/
 ├── dist/index.html              pantalla de respaldo (requerida por Tauri)
 ├── package.json                 scripts de build
 ├── src-tauri/
-│   ├── tauri.conf.json          nombre, versión, URL del servidor, instaladores
+│   ├── tauri.conf.json          nombre, versión, iconos, instaladores, entitlements
 │   ├── Cargo.toml               dependencias Rust + versión
+│   ├── Info.plist               textos de permiso (micrófono/cámara) en macOS
+│   ├── Entitlements.plist       entitlements de macOS (audio-input, cámara, red)
 │   ├── build.rs
 │   ├── capabilities/default.json
 │   ├── icons/                   se generan desde app-icon.png
-│   └── src/{main.rs,lib.rs}
+│   └── src/{main.rs,lib.rs}     lib.rs crea la ventana + SERVER_URL + tray
 └── .github/workflows/build.yml  build automático de .exe (Windows) y .dmg (macOS)
 ```

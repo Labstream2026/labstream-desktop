@@ -8,20 +8,7 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [
-      {
-        "label": "main",
-        "title": "Labstream OS",
-        "url": "https://os.labstreamsas.com",
-        "width": 1400,
-        "height": 900,
-        "minWidth": 1024,
-        "minHeight": 700,
-        "resizable": true,
-        "center": true,
-        "decorations": true
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }
@@ -32,7 +19,7 @@
     "publisher": "Labstream SAS",
     "category": "Productivity",
     "shortDescription": "Espacio de trabajo de Labstream",
-    "longDescription": "Cliente de escritorio de Labstream OS para Windows. Abre el espacio de trabajo de Labstream en su propia ventana.",
+    "longDescription": "Cliente de escritorio de Labstream OS para Windows y macOS. Abre el espacio de trabajo de Labstream en su propia ventana.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -47,7 +34,8 @@
       }
     },
     "macOS": {
-      "minimumSystemVersion": "10.15"
+      "minimumSystemVersion": "10.15",
+      "entitlements": "Entitlements.plist"
     }
   }
 }
