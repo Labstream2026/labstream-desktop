@@ -1,21 +1,33 @@
 # Labstream OS — App de escritorio (Windows + macOS)
 
-Envoltorio de escritorio para **Labstream OS**. Es un cliente delgado hecho con
-[Tauri 2](https://tauri.app): abre una ventana propia (sin barra de navegador)
-que carga el servidor de Labstream OS que corre en el NAS
-(`https://os.labstreamsas.com`).
+Cliente de escritorio para **Labstream OS**, hecho con [Tauri 2](https://tauri.app).
+Desde la v1.1.0 no es un envoltorio de una sola vista: es un **shell con pestañas**
+(multiwebview) sobre el servidor del NAS (`https://os.labstreamsas.com`).
 
 No contiene la app: el backend, la base de datos, OnlyOffice, etc. siguen en el
-NAS. Esto solo le da al equipo un ícono y una ventana propia en Windows y Mac.
+NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
 
-Además del ícono y la ventana, el envoltorio añade comportamiento de cliente nativo:
-
-- **Enlaces externos** (Drive, documentos ajenos…) abren en el **navegador del sistema**;
-  la navegación del propio servidor y el **login por Authentik** se quedan dentro.
+- **Pestañas** como en un navegador: los enlaces internos con `target="_blank"`
+  (documentos, entregables, exportaciones, OnlyOffice…) abren **pestaña dentro de
+  la app** — antes morían en silencio. También ⌘/Ctrl+clic y clic central.
+  Atajos: ⌘/Ctrl+T nueva, ⌘/Ctrl+W cerrar, Ctrl+Tab rotar, ⌘/Ctrl+1…9 ir a la n.
+  La sesión (pestañas abiertas, activa) **se restaura** al reabrir.
+- **Zoom de interfaz**: ⌘/Ctrl `+` / `−` / `0` y Ctrl+rueda, con indicador en la
+  barra y **persistencia** entre sesiones (50%–250%).
+- **Documentos dentro de la app**: los visores/editores del propio servidor
+  (OnlyOffice, PDFs, reproductor de revisión) abren en pestañas; solo lo de OTRO
+  origen (Drive…) sale al **navegador del sistema**. El **login por Authentik**
+  sigue funcionando dentro.
 - **Notas de voz / cámara**: pide permiso de micrófono y cámara (entitlements de macOS).
 - **Descargas** (entregables, exportaciones) con el diálogo nativo de guardado.
 - **Bandeja del sistema**: cerrar la ventana la oculta; la app sigue notificando.
+  En macOS, el clic en el **Dock** también reabre la ventana, y hay **menú nativo**
+  en español (Edición/Vista/Archivo) con los atajos.
 - **Arranque automático** al iniciar sesión y **sesión persistente** (no re-loguea).
+- **Una sola instancia** (release): abrirla de nuevo enfoca la ventana existente.
+
+La barra de pestañas vive en `dist/index.html` (webview local «chrome»); las
+pestañas son webviews hijos `tab-*`. Shell ↔ Rust se hablan por eventos `ls-*`.
 
 El servidor objetivo se configura en `src-tauri/src/lib.rs` → constante `SERVER_URL`.
 

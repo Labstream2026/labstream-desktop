@@ -1,70 +1,489 @@
 // Punto de entrada de la app de escritorio de Labstream OS.
-// Es un "envoltorio": la ventana carga directamente el servidor (os.labstreamsas.com),
-// así que aquí no hay UI propia. Sí añadimos comportamiento de cliente nativo:
-//   - plugin `opener`: enlaces externos abren el navegador del sistema.
-//   - plugin `notification`: la web (vía window.__TAURI__) muestra avisos nativos.
+//
+// Ya no es un envoltorio de UNA webview: es un SHELL DE PESTAÑAS (multiwebview de Tauri 2).
+// La ventana "main" contiene:
+//   - un webview "chrome" (dist/index.html, local): la barra de pestañas + zoom, con acceso IPC.
+//   - N webviews "tab-*" (remotos): cada pestaña carga el servidor (os.labstreamsas.com).
+//
+// Con esto los enlaces internos con target=_blank (documentos, entregables, exportaciones,
+// OnlyOffice…) — que antes MORÍAN en silencio — abren una pestaña dentro de la app, igual que
+// en el navegador. Cmd/Ctrl+clic también abre pestaña. Los enlaces a OTRO origen siguen yendo
+// al navegador del sistema.
+//
+// Comportamiento de cliente nativo que se conserva del envoltorio anterior:
+//   - plugin `opener`: enlaces externos al navegador del sistema.
+//   - plugin `notification`: la web (window.__TAURI__) muestra avisos nativos.
 //   - plugin `autostart`: la app arranca al iniciar sesión.
-//   - plugin `updater`: al abrir, busca una versión nueva en los Releases de GitHub
-//     (firmada) y, si la hay, la instala sola y reinicia.
-//   - bandeja (tray) + "cerrar = ocultar": la app sigue corriendo y notificando
-//     aunque cierres la ventana.
-//   - la ventana se crea AQUÍ (no en tauri.conf.json) para poder inyectar un script
-//     que manda los enlaces externos al navegador y para permitir descargas.
+//   - plugin `updater`: busca versión nueva en los Releases de GitHub y se actualiza sola.
+//   - bandeja (tray) + "cerrar = ocultar": sigue corriendo y notificando en segundo plano.
+// Y lo nuevo:
+//   - ZOOM de interfaz (Cmd/Ctrl +/−/0 y Ctrl+rueda) con persistencia entre sesiones.
+//   - Sesión restaurada: al reabrir vuelve con las mismas pestañas y tamaño de ventana.
+//   - single-instance (solo release): abrir la app de nuevo enfoca la ventana existente.
+//   - macOS: clic en el Dock reabre la ventana oculta (RunEvent::Reopen) y menú nativo con
+//     atajos de pestañas/zoom (los del teclado los consume el menú; en Windows los maneja JS).
+//
+// La comunicación shell ↔ Rust va por EVENTOS (`__TAURI__.event`), permitidos por
+// `core:default` también para el origen remoto (capabilities/default.json). Así no hace falta
+// declarar comandos propios en el ACL para páginas remotas.
 
+use std::sync::Mutex;
+
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    webview::{PageLoadEvent, Webview, WebviewBuilder},
+    window::{Window, WindowBuilder},
+    AppHandle, Emitter, EventTarget, Listener, LogicalPosition, LogicalSize, Manager, Runtime,
+    Url, WebviewUrl, WindowEvent,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_notification::NotificationExt;
 
 const SERVER_URL: &str = "https://os.labstreamsas.com";
+const TAB_BAR_H: f64 = 40.0; // alto lógico de la barra de pestañas (chrome)
+const CHROME: &str = "chrome";
 
-// Script que corre en CADA carga de página del servidor. Reenvía al NAVEGADOR del sistema los
-// enlaces a OTRO origen (Drive, documentos externos, etc.): clics en `<a>` externos, `target=_blank`
-// externos y `window.open(url)` externos. NO toca la navegación del propio origen, así el login por
-// Authentik —que redirige a otro dominio y vuelve— sigue funcionando. Usa el comando del plugin
-// opener, permitido por la capability `opener:default` para este origen remoto.
-const INIT_JS: &str = r#"
+// Escalones de zoom (como un navegador). 1.0 = 100%.
+const ZOOM_STEPS: &[f64] = &[0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5];
+const ZOOM_100: usize = 5; // índice de 1.0 en ZOOM_STEPS
+
+// ── Estado del shell ──
+
+struct TabRec {
+    label: String,
+    title: String,
+    url: String,
+}
+
+struct Shell {
+    tabs: Vec<TabRec>,
+    active: usize,
+    zoom_idx: usize,
+    next_id: u64,
+    win: Option<WinRect>,
+}
+
+impl Default for Shell {
+    fn default() -> Self {
+        Self { tabs: Vec::new(), active: 0, zoom_idx: ZOOM_100, next_id: 1, win: None }
+    }
+}
+
+type ShellState = Mutex<Shell>;
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct WinRect {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+// Lo que se guarda en disco entre sesiones (zoom, ventana y pestañas abiertas).
+#[derive(Serialize, Deserialize, Default)]
+struct Persisted {
+    #[serde(default)]
+    zoom_idx: Option<usize>,
+    #[serde(default)]
+    win: Option<WinRect>,
+    #[serde(default)]
+    tabs: Vec<String>,
+    #[serde(default)]
+    active: usize,
+}
+
+fn state_path<R: Runtime>(app: &AppHandle<R>) -> Option<std::path::PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("estado.json"))
+}
+
+fn load_persisted<R: Runtime>(app: &AppHandle<R>) -> Persisted {
+    state_path(app)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_persisted<R: Runtime>(app: &AppHandle<R>) {
+    let Some(path) = state_path(app) else { return };
+    let data = {
+        let shell = app.state::<ShellState>();
+        let s = shell.lock().unwrap();
+        Persisted {
+            zoom_idx: Some(s.zoom_idx),
+            win: s.win,
+            tabs: s.tabs.iter().map(|t| t.url.clone()).collect(),
+            active: s.active,
+        }
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(txt) = serde_json::to_string_pretty(&data) {
+        let _ = std::fs::write(path, txt);
+    }
+}
+
+// ── Script inyectado en CADA página de las pestañas (origen remoto) ──
+// - Enlaces a OTRO origen → navegador del sistema (opener), como antes.
+// - target=_blank internos, Cmd/Ctrl+clic y window.open internos → pestaña nueva en la app.
+// - Reporta título/URL a la barra (observer del <title> + pushState del SPA).
+// - Atajos de teclado (en macOS los consume antes el menú nativo; esto cubre Windows y extras)
+//   y Ctrl+rueda para zoom.
+// En páginas de OTRO origen (p. ej. el login de Authentik) __TAURI__ no está inyectado y el
+// script sale al principio sin tocar nada — la navegación del SSO sigue intacta.
+const INIT_JS_TPL: &str = r#"
 (function () {
-  if (window.__lsExternalLinks) return;
-  window.__lsExternalLinks = true;
-  var APP_ORIGIN = location.origin;
-  function toAbs(href) { try { return new URL(href, location.href); } catch (e) { return null; } }
-  function isExternal(u) { return !!u && (u.protocol === 'http:' || u.protocol === 'https:') && u.origin !== APP_ORIGIN; }
+  if (window.__lsShell) return;
+  window.__lsShell = true;
+  var T = window.__TAURI__;
+  if (!T || !T.event) return; // página fuera del origen permitido (p. ej. SSO): no intervenir
+  var LABEL = "__LABEL__";
+  var ORIGIN = "__ORIGIN__";
+
+  function abs(h) { try { return new URL(h, location.href); } catch (e) { return null; } }
+  function isHttp(u) { return !!u && (u.protocol === 'http:' || u.protocol === 'https:'); }
+  function isApp(u) { return isHttp(u) && u.origin === ORIGIN; }
+  function isExt(u) { return isHttp(u) && u.origin !== ORIGIN; }
+  function emit(name, payload) { try { T.event.emit(name, payload); } catch (e) {} }
   function openExternal(url) {
-    try { window.__TAURI__.core.invoke('plugin:opener|open_url', { url: url, with: null }); }
-    catch (e) { try { window.__TAURI__.opener.openUrl(url); } catch (_) {} }
+    try { T.core.invoke('plugin:opener|open_url', { url: url, with: null }); }
+    catch (e) { try { T.opener.openUrl(url); } catch (_) {} }
   }
+  function newTab(url) { emit('ls-new-tab', { url: url }); }
+
+  // Título y URL → barra de pestañas (y para restaurar la sesión al reabrir).
+  function report() {
+    emit('ls-title', { label: LABEL, title: document.title || 'Labstream OS', url: location.href });
+  }
+  function watchTitle() {
+    var el = document.querySelector('title');
+    if (el && window.MutationObserver) {
+      new MutationObserver(report).observe(el, { childList: true, characterData: true, subtree: true });
+    }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () { watchTitle(); report(); });
+  } else { watchTitle(); }
+  addEventListener('load', report);
+  report();
+  ['pushState', 'replaceState'].forEach(function (k) {
+    var o = history[k];
+    if (!o) return;
+    history[k] = function () { var r = o.apply(this, arguments); setTimeout(report, 0); return r; };
+  });
+  addEventListener('popstate', function () { setTimeout(report, 0); });
+
+  // Clics en enlaces.
   document.addEventListener('click', function (e) {
-    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    if (e.defaultPrevented || e.button !== 0) return;
     var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
     if (!a) return;
-    var u = toAbs(a.getAttribute('href'));
-    if (isExternal(u)) { e.preventDefault(); openExternal(u.href); }
+    var u = abs(a.getAttribute('href'));
+    if (!u) return;
+    if (isExt(u)) { e.preventDefault(); openExternal(u.href); return; }
+    var mod = e.metaKey || e.ctrlKey;
+    if (isApp(u) && (mod || a.target === '_blank')) { e.preventDefault(); newTab(u.href); }
   }, true);
+
+  // Clic con la rueda (botón central) en un enlace interno → pestaña nueva, como en el navegador.
+  document.addEventListener('auxclick', function (e) {
+    if (e.button !== 1) return;
+    var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a) return;
+    var u = abs(a.getAttribute('href'));
+    if (isExt(u)) { e.preventDefault(); openExternal(u.href); return; }
+    if (isApp(u)) { e.preventDefault(); newTab(u.href); }
+  }, true);
+
   var _open = window.open;
   window.open = function (url, name, feats) {
-    var u = url ? toAbs(url) : null;
-    if (isExternal(u)) { openExternal(u.href); return null; }
+    var u = url ? abs(url) : null;
+    if (isExt(u)) { openExternal(u.href); return null; }
+    if (isApp(u)) { newTab(u.href); return null; }
     return _open ? _open.call(window, url, name, feats) : null;
   };
+
+  // Atajos de teclado.
+  addEventListener('keydown', function (e) {
+    var mod = e.metaKey || e.ctrlKey;
+    if (!mod) return;
+    var k = e.key;
+    if (k === 't' || k === 'T') { e.preventDefault(); newTab(null); }
+    else if (k === 'w' || k === 'W') { e.preventDefault(); emit('ls-close-tab', { label: LABEL }); }
+    else if ((k === 'r' || k === 'R') && !e.shiftKey) { e.preventDefault(); location.reload(); }
+    else if (k === '=' || k === '+') { e.preventDefault(); emit('ls-zoom', { dir: 1 }); }
+    else if (k === '-') { e.preventDefault(); emit('ls-zoom', { dir: -1 }); }
+    else if (k === '0') { e.preventDefault(); emit('ls-zoom', { dir: 0 }); }
+    else if (k === 'Tab') { e.preventDefault(); emit('ls-cycle', { dir: e.shiftKey ? -1 : 1 }); }
+    else if (k >= '1' && k <= '9') { e.preventDefault(); emit('ls-activate-n', { n: +k }); }
+  }, true);
+
+  // Ctrl+rueda = zoom (convención de navegador; en Mac también con Ctrl).
+  addEventListener('wheel', function (e) {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    emit('ls-zoom', { dir: e.deltaY < 0 ? 1 : -1 });
+  }, { passive: false, capture: true });
 })();
 "#;
 
-// Muestra y enfoca la ventana principal (desde el tray o su menú).
+// ── Utilidades del shell ──
+
+fn main_window<R: Runtime>(app: &AppHandle<R>) -> Option<Window<R>> {
+    app.get_window("main")
+}
+
+fn get_webview<R: Runtime>(app: &AppHandle<R>, label: &str) -> Option<Webview<R>> {
+    main_window(app).and_then(|w| w.webviews().into_iter().find(|v| v.label() == label))
+}
+
+// Geometría: barra arriba (alto fijo), contenido debajo ocupando el resto.
+fn layout_all<R: Runtime>(app: &AppHandle<R>) {
+    let Some(win) = main_window(app) else { return };
+    let scale = win.scale_factor().unwrap_or(1.0);
+    let Ok(size) = win.inner_size() else { return };
+    let size = size.to_logical::<f64>(scale);
+    let content_h = (size.height - TAB_BAR_H).max(0.0);
+    for wv in win.webviews() {
+        if wv.label() == CHROME {
+            let _ = wv.set_position(LogicalPosition::new(0.0, 0.0));
+            let _ = wv.set_size(LogicalSize::new(size.width, TAB_BAR_H));
+        } else {
+            let _ = wv.set_position(LogicalPosition::new(0.0, TAB_BAR_H));
+            let _ = wv.set_size(LogicalSize::new(size.width, content_h));
+        }
+    }
+}
+
+fn current_zoom<R: Runtime>(app: &AppHandle<R>) -> f64 {
+    let shell = app.state::<ShellState>();
+    let s = shell.lock().unwrap();
+    ZOOM_STEPS[s.zoom_idx.min(ZOOM_STEPS.len() - 1)]
+}
+
+// Manda el estado de pestañas + zoom a la barra (webview "chrome").
+fn broadcast<R: Runtime>(app: &AppHandle<R>) {
+    let payload = {
+        let shell = app.state::<ShellState>();
+        let s = shell.lock().unwrap();
+        let tabs: Vec<_> = s
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| json!({ "label": t.label, "title": t.title, "active": i == s.active }))
+            .collect();
+        json!({ "tabs": tabs, "zoom": (ZOOM_STEPS[s.zoom_idx.min(ZOOM_STEPS.len()-1)] * 100.0).round() as u32 })
+    };
+    let _ = app.emit_to(EventTarget::webview(CHROME), "ls-tabs", payload);
+}
+
+// Muestra la pestaña `label` y esconde las demás. Devuelve el foco al contenido.
+fn activate_tab<R: Runtime>(app: &AppHandle<R>, label: &str) {
+    {
+        let shell = app.state::<ShellState>();
+        let mut s = shell.lock().unwrap();
+        if let Some(i) = s.tabs.iter().position(|t| t.label == label) {
+            s.active = i;
+        } else {
+            return;
+        }
+    }
+    let Some(win) = main_window(app) else { return };
+    for wv in win.webviews() {
+        if wv.label() == CHROME {
+            continue;
+        }
+        if wv.label() == label {
+            let _ = wv.show();
+            let _ = wv.set_focus();
+        } else {
+            let _ = wv.hide();
+        }
+    }
+    broadcast(app);
+    save_persisted(app);
+}
+
+// Crea una pestaña nueva cargando `url` (o el servidor si viene vacío).
+fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: bool) {
+    let target = url.unwrap_or_else(|| SERVER_URL.to_string());
+    // Solo el origen de la app puede abrirse en pestaña; cualquier otra cosa va al navegador.
+    let Ok(parsed) = Url::parse(&target) else { return };
+    let Ok(server) = Url::parse(SERVER_URL) else { return };
+    if parsed.origin() != server.origin() {
+        return;
+    }
+
+    let label = {
+        let shell = app.state::<ShellState>();
+        let mut s = shell.lock().unwrap();
+        let label = format!("tab-{}", s.next_id);
+        s.next_id += 1;
+        s.tabs.push(TabRec { label: label.clone(), title: "Labstream OS".into(), url: target.clone() });
+        label
+    };
+
+    let Some(win) = main_window(app) else { return };
+    let scale = win.scale_factor().unwrap_or(1.0);
+    let size = win.inner_size().map(|s| s.to_logical::<f64>(scale)).unwrap_or(LogicalSize::new(1400.0, 900.0));
+
+    let init = INIT_JS_TPL.replace("__LABEL__", &label).replace("__ORIGIN__", SERVER_URL);
+    let app_zoom = app.clone();
+    let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed))
+        .initialization_script(&init)
+        // Deja pasar las descargas (entregables, exportaciones) con el diálogo nativo de guardado.
+        .on_download(|_webview, _event| true)
+        // El zoom guardado se re-aplica en cada carga (el factor no siempre sobrevive a la navegación).
+        .on_page_load(move |wv, payload| {
+            if let PageLoadEvent::Finished = payload.event() {
+                let _ = wv.set_zoom(current_zoom(&app_zoom));
+            }
+        });
+
+    let created = win.add_child(
+        builder,
+        LogicalPosition::new(0.0, TAB_BAR_H),
+        LogicalSize::new(size.width, (size.height - TAB_BAR_H).max(0.0)),
+    );
+
+    match created {
+        Ok(_) => {
+            if activate {
+                activate_tab(app, &label);
+            } else {
+                broadcast(app);
+                save_persisted(app);
+            }
+        }
+        Err(_) => {
+            // Revertir el registro si el webview no se pudo crear.
+            let shell = app.state::<ShellState>();
+            let mut s = shell.lock().unwrap();
+            s.tabs.retain(|t| t.label != label);
+        }
+    }
+}
+
+// Cierra una pestaña; si era la activa, activa la vecina. Nunca deja cero pestañas.
+fn close_tab<R: Runtime>(app: &AppHandle<R>, label: &str) {
+    let next_active: Option<String> = {
+        let shell = app.state::<ShellState>();
+        let mut s = shell.lock().unwrap();
+        let Some(i) = s.tabs.iter().position(|t| t.label == label) else { return };
+        let was_active = i == s.active;
+        s.tabs.remove(i);
+        if s.tabs.is_empty() {
+            s.active = 0;
+            None
+        } else {
+            if s.active >= s.tabs.len() {
+                s.active = s.tabs.len() - 1;
+            } else if !was_active && i < s.active {
+                s.active -= 1;
+            }
+            was_active.then(|| s.tabs[s.active].label.clone())
+        }
+    };
+
+    if let Some(wv) = get_webview(app, label) {
+        let _ = wv.close();
+    }
+
+    let is_empty = {
+        let shell = app.state::<ShellState>();
+        let n = shell.lock().unwrap().tabs.len();
+        n == 0
+    };
+    if is_empty {
+        create_tab(app, None, true);
+    } else if let Some(next) = next_active {
+        activate_tab(app, &next);
+    } else {
+        broadcast(app);
+        save_persisted(app);
+    }
+}
+
+// Aplica un paso de zoom (+1 / −1 / 0 = restablecer) a TODAS las pestañas y lo persiste.
+fn zoom_step<R: Runtime>(app: &AppHandle<R>, dir: i32) {
+    {
+        let shell = app.state::<ShellState>();
+        let mut s = shell.lock().unwrap();
+        s.zoom_idx = match dir {
+            0 => ZOOM_100,
+            d if d > 0 => (s.zoom_idx + 1).min(ZOOM_STEPS.len() - 1),
+            _ => s.zoom_idx.saturating_sub(1),
+        };
+    }
+    let z = current_zoom(app);
+    if let Some(win) = main_window(app) {
+        for wv in win.webviews() {
+            if wv.label() != CHROME {
+                let _ = wv.set_zoom(z);
+            }
+        }
+    }
+    broadcast(app);
+    save_persisted(app);
+}
+
+fn active_label<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    let shell = app.state::<ShellState>();
+    let s = shell.lock().unwrap();
+    s.tabs.get(s.active).map(|t| t.label.clone())
+}
+
+fn reload_tab<R: Runtime>(app: &AppHandle<R>, label: Option<String>) {
+    let label = label.or_else(|| active_label(app));
+    if let Some(l) = label {
+        if let Some(wv) = get_webview(app, &l) {
+            let _ = wv.eval("location.reload()");
+        }
+    }
+}
+
+// Rota a la pestaña siguiente/anterior (Ctrl+Tab / Ctrl+Shift+Tab).
+fn cycle_tab<R: Runtime>(app: &AppHandle<R>, dir: i32) {
+    let label = {
+        let shell = app.state::<ShellState>();
+        let s = shell.lock().unwrap();
+        if s.tabs.is_empty() {
+            return;
+        }
+        let n = s.tabs.len() as i32;
+        let i = ((s.active as i32 + dir) % n + n) % n;
+        s.tabs[i as usize].label.clone()
+    };
+    activate_tab(app, &label);
+}
+
+// Activa la pestaña n (1-9; 9 = última, como en los navegadores).
+fn activate_nth<R: Runtime>(app: &AppHandle<R>, n: usize) {
+    let label = {
+        let shell = app.state::<ShellState>();
+        let s = shell.lock().unwrap();
+        if s.tabs.is_empty() {
+            return;
+        }
+        let i = if n >= 9 || n > s.tabs.len() { s.tabs.len() - 1 } else { n - 1 };
+        s.tabs[i].label.clone()
+    };
+    activate_tab(app, &label);
+}
+
+// Muestra y enfoca la ventana principal (tray, dock, segunda instancia).
 fn show_main<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(w) = app.get_webview_window("main") {
+    if let Some(w) = main_window(app) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
     }
 }
 
-// Busca e instala una actualización en segundo plano (best-effort, no molesta al usuario).
-// Compara con el `latest.json` publicado en los Releases de GitHub; si hay una versión más
-// nueva y firmada con nuestra clave, la descarga, la instala y reinicia la app. Si no hay
-// red o no hay actualización, no hace nada.
+// Busca e instala una actualización en segundo plano. Si instala, avisa y reinicia.
 #[cfg(desktop)]
 async fn check_update(handle: tauri::AppHandle) {
     use tauri_plugin_updater::UpdaterExt;
@@ -74,21 +493,50 @@ async fn check_update(handle: tauri::AppHandle) {
     };
     if let Ok(Some(update)) = updater.check().await {
         if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
+            let _ = handle
+                .notification()
+                .builder()
+                .title("Labstream OS")
+                .body("Se instaló una actualización. La app se reiniciará.")
+                .show();
             handle.restart();
         }
     }
 }
 
+// Extrae un campo string del payload JSON de un evento.
+fn field(payload: &str, key: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()?
+        .get(key)?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+fn field_i64(payload: &str, key: &str) -> Option<i64> {
+    serde_json::from_str::<serde_json::Value>(payload).ok()?.get(key)?.as_i64()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    // Una sola instancia (solo en release: en dev conviviría con la app instalada).
+    #[cfg(not(debug_assertions))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main(app);
+        }));
+    }
+
+    builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_autostart::init(
-            MacosLauncher::LaunchAgent,
-            None,
-        ))
+        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None));
+
+    let app = builder
+        .manage(ShellState::default())
         .setup(|app| {
             // Arranque automático al iniciar sesión (idempotente).
             let _ = app.autolaunch().enable();
@@ -100,22 +548,214 @@ pub fn run() {
                 tauri::async_runtime::spawn(check_update(handle));
             }
 
-            // Ventana principal: carga el servidor del NAS. Se crea aquí (no en el config) para
-            // poder inyectar el script de enlaces externos y permitir las descargas.
-            WebviewWindowBuilder::new(
-                app,
-                "main",
-                WebviewUrl::External(SERVER_URL.parse().expect("URL del servidor válida")),
-            )
-            .title("Labstream OS")
-            .inner_size(1400.0, 900.0)
-            .min_inner_size(1024.0, 700.0)
-            .resizable(true)
-            .center()
-            .initialization_script(INIT_JS)
-            // Deja pasar las descargas (entregables, exportaciones) con el diálogo nativo de guardado.
-            .on_download(|_webview, _event| true)
-            .build()?;
+            let handle = app.handle().clone();
+            let saved = load_persisted(&handle);
+            {
+                let shell = handle.state::<ShellState>();
+                let mut s = shell.lock().unwrap();
+                s.zoom_idx = saved.zoom_idx.unwrap_or(ZOOM_100).min(ZOOM_STEPS.len() - 1);
+                s.win = saved.win;
+            }
+
+            // Ventana principal (contenedora). Tamaño/posición de la sesión anterior si los hay.
+            let mut wb = WindowBuilder::new(app, "main")
+                .title("Labstream OS")
+                .resizable(true)
+                .min_inner_size(1024.0, 700.0);
+            match saved.win {
+                Some(r) if r.w >= 600.0 && r.h >= 400.0 => {
+                    wb = wb.inner_size(r.w, r.h).position(r.x, r.y);
+                }
+                _ => {
+                    wb = wb.inner_size(1400.0, 900.0).center();
+                }
+            }
+            let win = wb.build()?;
+
+            // Menú nativo SOLO en macOS: da Cmd+C/V (Edición), y los atajos de pestañas/zoom
+            // como aceleradores de menú. En Windows no ponemos menú (los atajos van por JS).
+            #[cfg(target_os = "macos")]
+            {
+                let h = app.handle();
+                let app_menu = Submenu::with_items(
+                    h,
+                    "Labstream OS",
+                    true,
+                    &[
+                        &PredefinedMenuItem::hide(h, Some("Ocultar Labstream OS"))?,
+                        &PredefinedMenuItem::hide_others(h, Some("Ocultar otros"))?,
+                        &PredefinedMenuItem::show_all(h, Some("Mostrar todo"))?,
+                        &PredefinedMenuItem::separator(h)?,
+                        &PredefinedMenuItem::quit(h, Some("Salir de Labstream OS"))?,
+                    ],
+                )?;
+                let archivo = Submenu::with_items(
+                    h,
+                    "Archivo",
+                    true,
+                    &[
+                        &MenuItem::with_id(h, "new-tab", "Nueva pestaña", true, Some("CmdOrCtrl+T"))?,
+                        &MenuItem::with_id(h, "close-tab", "Cerrar pestaña", true, Some("CmdOrCtrl+W"))?,
+                    ],
+                )?;
+                let edicion = Submenu::with_items(
+                    h,
+                    "Edición",
+                    true,
+                    &[
+                        &PredefinedMenuItem::undo(h, Some("Deshacer"))?,
+                        &PredefinedMenuItem::redo(h, Some("Rehacer"))?,
+                        &PredefinedMenuItem::separator(h)?,
+                        &PredefinedMenuItem::cut(h, Some("Cortar"))?,
+                        &PredefinedMenuItem::copy(h, Some("Copiar"))?,
+                        &PredefinedMenuItem::paste(h, Some("Pegar"))?,
+                        &PredefinedMenuItem::select_all(h, Some("Seleccionar todo"))?,
+                    ],
+                )?;
+                let vista = Submenu::with_items(
+                    h,
+                    "Vista",
+                    true,
+                    &[
+                        &MenuItem::with_id(h, "reload", "Recargar", true, Some("CmdOrCtrl+R"))?,
+                        &PredefinedMenuItem::separator(h)?,
+                        &MenuItem::with_id(h, "zoom-in", "Acercar", true, Some("CmdOrCtrl+="))?,
+                        &MenuItem::with_id(h, "zoom-out", "Alejar", true, Some("CmdOrCtrl+-"))?,
+                        &MenuItem::with_id(h, "zoom-0", "Tamaño real", true, Some("CmdOrCtrl+0"))?,
+                        &PredefinedMenuItem::separator(h)?,
+                        &PredefinedMenuItem::fullscreen(h, Some("Pantalla completa"))?,
+                    ],
+                )?;
+                let ventana = Submenu::with_items(
+                    h,
+                    "Ventana",
+                    true,
+                    &[
+                        &PredefinedMenuItem::minimize(h, Some("Minimizar"))?,
+                        &PredefinedMenuItem::maximize(h, Some("Zoom"))?,
+                    ],
+                )?;
+                let menu = Menu::with_items(h, &[&app_menu, &archivo, &edicion, &vista, &ventana])?;
+                app.set_menu(menu)?;
+                app.on_menu_event(|app, event| match event.id().as_ref() {
+                    "new-tab" => create_tab(app, None, true),
+                    "close-tab" => {
+                        if let Some(l) = active_label(app) {
+                            close_tab(app, &l);
+                        }
+                    }
+                    "reload" => reload_tab(app, None),
+                    "zoom-in" => zoom_step(app, 1),
+                    "zoom-out" => zoom_step(app, -1),
+                    "zoom-0" => zoom_step(app, 0),
+                    _ => {}
+                });
+            }
+
+            // Barra de pestañas (webview local, arriba).
+            let scale = win.scale_factor().unwrap_or(1.0);
+            let size = win.inner_size()?.to_logical::<f64>(scale);
+            win.add_child(
+                WebviewBuilder::new(CHROME, WebviewUrl::App("index.html".into())),
+                LogicalPosition::new(0.0, 0.0),
+                LogicalSize::new(size.width, TAB_BAR_H),
+            )?;
+
+            // Pestañas de la sesión anterior (o una nueva si no hay).
+            let restore: Vec<String> = {
+                let server = Url::parse(SERVER_URL).expect("URL del servidor válida");
+                saved
+                    .tabs
+                    .iter()
+                    .filter(|u| Url::parse(u).map(|p| p.origin() == server.origin()).unwrap_or(false))
+                    .take(12)
+                    .cloned()
+                    .collect()
+            };
+            if restore.is_empty() {
+                create_tab(&handle, None, true);
+            } else {
+                for url in &restore {
+                    create_tab(&handle, Some(url.clone()), false);
+                }
+                let idx = saved.active.min(restore.len() - 1);
+                let label = {
+                    let shell = handle.state::<ShellState>();
+                    let s = shell.lock().unwrap();
+                    s.tabs.get(idx).map(|t| t.label.clone())
+                };
+                if let Some(l) = label {
+                    activate_tab(&handle, &l);
+                }
+            }
+
+            // ── Eventos del shell (desde la barra y desde las pestañas) ──
+            let h = handle.clone();
+            handle.listen_any("ls-ready", move |_| {
+                layout_all(&h);
+                broadcast(&h);
+            });
+            let h = handle.clone();
+            handle.listen_any("ls-new-tab", move |e| {
+                let url = field(e.payload(), "url");
+                create_tab(&h, url, true);
+            });
+            let h = handle.clone();
+            handle.listen_any("ls-activate", move |e| {
+                if let Some(l) = field(e.payload(), "label") {
+                    activate_tab(&h, &l);
+                }
+            });
+            let h = handle.clone();
+            handle.listen_any("ls-close-tab", move |e| {
+                let label = field(e.payload(), "label").or_else(|| active_label(&h));
+                if let Some(l) = label {
+                    close_tab(&h, &l);
+                }
+            });
+            let h = handle.clone();
+            handle.listen_any("ls-reload", move |e| {
+                reload_tab(&h, field(e.payload(), "label"));
+            });
+            let h = handle.clone();
+            handle.listen_any("ls-zoom", move |e| {
+                let dir = field_i64(e.payload(), "dir").unwrap_or(0) as i32;
+                zoom_step(&h, dir);
+            });
+            let h = handle.clone();
+            handle.listen_any("ls-cycle", move |e| {
+                let dir = field_i64(e.payload(), "dir").unwrap_or(1) as i32;
+                cycle_tab(&h, dir);
+            });
+            let h = handle.clone();
+            handle.listen_any("ls-activate-n", move |e| {
+                if let Some(n) = field_i64(e.payload(), "n") {
+                    activate_nth(&h, n.max(1) as usize);
+                }
+            });
+            let h = handle.clone();
+            handle.listen_any("ls-title", move |e| {
+                let (label, title, url) = (
+                    field(e.payload(), "label"),
+                    field(e.payload(), "title"),
+                    field(e.payload(), "url"),
+                );
+                if let Some(label) = label {
+                    let shell = h.state::<ShellState>();
+                    let mut s = shell.lock().unwrap();
+                    if let Some(t) = s.tabs.iter_mut().find(|t| t.label == label) {
+                        if let Some(title) = title {
+                            t.title = title;
+                        }
+                        if let Some(url) = url {
+                            t.url = url;
+                        }
+                    }
+                    drop(s);
+                    broadcast(&h);
+                    save_persisted(&h);
+                }
+            });
 
             // Icono en la bandeja del sistema con menú Abrir / Salir.
             let abrir = MenuItem::with_id(app, "abrir", "Abrir Labstream", true, None::<&str>)?;
@@ -129,7 +769,10 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "abrir" => show_main(app),
-                    "salir" => app.exit(0),
+                    "salir" => {
+                        save_persisted(app);
+                        app.exit(0);
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -147,13 +790,54 @@ pub fn run() {
 
             Ok(())
         })
-        // Cerrar la ventana = ocultarla a la bandeja (la app sigue notificando).
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
+            match event {
+                // Cerrar la ventana = ocultarla a la bandeja (la app sigue notificando).
+                WindowEvent::CloseRequested { api, .. } => {
+                    save_persisted(window.app_handle());
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
+                // La barra y las pestañas siguen el tamaño de la ventana.
+                WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                    let app = window.app_handle();
+                    layout_all(app);
+                    if let (Ok(pos), Ok(size)) = (window.outer_position(), window.inner_size()) {
+                        let scale = window.scale_factor().unwrap_or(1.0);
+                        let p = pos.to_logical::<f64>(scale);
+                        let s = size.to_logical::<f64>(scale);
+                        let shell = app.state::<ShellState>();
+                        shell.lock().unwrap().win =
+                            Some(WinRect { x: p.x, y: p.y, w: s.width, h: s.height });
+                    }
+                }
+                WindowEvent::Moved(_) => {
+                    let app = window.app_handle();
+                    if let (Ok(pos), Ok(size)) = (window.outer_position(), window.inner_size()) {
+                        let scale = window.scale_factor().unwrap_or(1.0);
+                        let p = pos.to_logical::<f64>(scale);
+                        let s = size.to_logical::<f64>(scale);
+                        let shell = app.state::<ShellState>();
+                        shell.lock().unwrap().win =
+                            Some(WinRect { x: p.x, y: p.y, w: s.width, h: s.height });
+                    }
+                }
+                _ => {}
             }
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error al arrancar Labstream OS");
+
+    app.run(|app, event| {
+        // macOS: clic en el icono del Dock con la ventana oculta → reabrirla.
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { .. } = event {
+            show_main(app);
+        }
+        // Al salir del todo, guarda el estado (pestañas, zoom, ventana).
+        if let tauri::RunEvent::ExitRequested { .. } = event {
+            save_persisted(app);
+        }
+        let _ = app;
+    });
 }

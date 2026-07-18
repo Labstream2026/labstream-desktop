@@ -1,8 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permisos por defecto del envoltorio de escritorio.",
+  "description": "Permisos del shell de escritorio: la barra local (chrome) y las pestañas remotas (tab-*).",
   "windows": ["main"],
+  "webviews": ["chrome", "tab-*"],
   "remote": {
     "urls": ["https://os.labstreamsas.com"]
   },
