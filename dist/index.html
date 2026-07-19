@@ -158,6 +158,7 @@
         <button id="z-pct" title="Restablecer zoom (⌘/Ctrl+0)">100%</button>
         <button id="z-mas" title="Acercar (⌘/Ctrl++)">+</button>
       </div>
+      <button class="icono" id="menu" title="Opciones de la app">⋮</button>
     </div>
     <script>
       const T = window.__TAURI__;
@@ -216,6 +217,12 @@
 
       document.getElementById("nueva").addEventListener("click", () => emitir("ls-new-tab", {}));
       document.getElementById("recargar").addEventListener("click", () => emitir("ls-reload", {}));
+      // Menú de OPCIONES de la app (nativo, lo pinta Rust): botón ⋮ o clic derecho en la barra.
+      document.getElementById("menu").addEventListener("click", () => emitir("ls-menu", {}));
+      document.getElementById("bar").addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        emitir("ls-menu", {});
+      });
       document.getElementById("z-menos").addEventListener("click", () => emitir("ls-zoom", { dir: -1 }));
       document.getElementById("z-mas").addEventListener("click", () => emitir("ls-zoom", { dir: 1 }));
       $pct.addEventListener("click", () => emitir("ls-zoom", { dir: 0 }));

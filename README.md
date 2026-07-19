@@ -25,6 +25,11 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   en español (Edición/Vista/Archivo) con los atajos.
 - **Arranque automático** al iniciar sesión y **sesión persistente** (no re-loguea).
 - **Una sola instancia** (release): abrirla de nuevo enfoca la ventana existente.
+- **Menú de opciones ⋮** (v1.2.0) en la barra — también con clic derecho sobre ella:
+  pestañas, zoom, recargar, abrir la página en el navegador, **Iniciar con el
+  sistema** (elección recordada) y **Buscar actualización…** con aviso del
+  resultado. Es un popup nativo del sistema, igual en Windows y macOS, y vive
+  solo en el shell (la web app no se toca).
 
 La barra de pestañas vive en `dist/index.html` (webview local «chrome»); las
 pestañas son webviews hijos `tab-*`. Shell ↔ Rust se hablan por eventos `ls-*`.

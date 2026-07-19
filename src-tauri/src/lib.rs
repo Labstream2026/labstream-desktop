@@ -32,7 +32,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     webview::{PageLoadEvent, Webview, WebviewBuilder},
     window::{Window, WindowBuilder},
@@ -41,6 +41,7 @@ use tauri::{
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_opener::OpenerExt;
 
 const SERVER_URL: &str = "https://os.labstreamsas.com";
 const TAB_BAR_H: f64 = 40.0; // alto lógico de la barra de pestañas (chrome)
@@ -64,11 +65,12 @@ struct Shell {
     zoom_idx: usize,
     next_id: u64,
     win: Option<WinRect>,
+    autostart: Option<bool>, // elección del usuario en el menú ⋮ (None = por defecto, activado)
 }
 
 impl Default for Shell {
     fn default() -> Self {
-        Self { tabs: Vec::new(), active: 0, zoom_idx: ZOOM_100, next_id: 1, win: None }
+        Self { tabs: Vec::new(), active: 0, zoom_idx: ZOOM_100, next_id: 1, win: None, autostart: None }
     }
 }
 
@@ -93,6 +95,8 @@ struct Persisted {
     tabs: Vec<String>,
     #[serde(default)]
     active: usize,
+    #[serde(default)]
+    autostart: Option<bool>,
 }
 
 fn state_path<R: Runtime>(app: &AppHandle<R>) -> Option<std::path::PathBuf> {
@@ -116,6 +120,7 @@ fn save_persisted<R: Runtime>(app: &AppHandle<R>) {
             win: s.win,
             tabs: s.tabs.iter().map(|t| t.url.clone()).collect(),
             active: s.active,
+            autostart: s.autostart,
         }
     };
     if let Some(dir) = path.parent() {
@@ -474,6 +479,95 @@ fn activate_nth<R: Runtime>(app: &AppHandle<R>, n: usize) {
     activate_tab(app, &label);
 }
 
+fn active_url<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    let shell = app.state::<ShellState>();
+    let s = shell.lock().unwrap();
+    s.tabs.get(s.active).map(|t| t.url.clone())
+}
+
+// Menú de OPCIONES de la app (botón ⋮ / clic derecho en la barra): un popup NATIVO del sistema,
+// igual en Windows y macOS. Se construye fresco en cada apertura para que el check de
+// "Iniciar con el sistema" y la versión estén siempre al día. Solo opciones del SHELL — la web
+// app no se toca.
+fn show_app_menu<R: Runtime>(app: &AppHandle<R>) {
+    let Some(win) = main_window(app) else { return };
+    let autostart_on = app.autolaunch().is_enabled().unwrap_or(false);
+    let version = format!("Versión {}", app.package_info().version);
+    let build = || -> tauri::Result<Menu<R>> {
+        Ok(Menu::with_items(
+            app,
+            &[
+                &MenuItem::with_id(app, "new-tab", "Nueva pestaña", true, Some("CmdOrCtrl+T"))?,
+                &MenuItem::with_id(app, "close-tab", "Cerrar pestaña", true, Some("CmdOrCtrl+W"))?,
+                &MenuItem::with_id(app, "reload", "Recargar", true, Some("CmdOrCtrl+R"))?,
+                &PredefinedMenuItem::separator(app)?,
+                &MenuItem::with_id(app, "zoom-in", "Acercar", true, Some("CmdOrCtrl+="))?,
+                &MenuItem::with_id(app, "zoom-out", "Alejar", true, Some("CmdOrCtrl+-"))?,
+                &MenuItem::with_id(app, "zoom-0", "Tamaño real", true, Some("CmdOrCtrl+0"))?,
+                &PredefinedMenuItem::separator(app)?,
+                &MenuItem::with_id(app, "open-browser", "Abrir esta página en el navegador", true, None::<&str>)?,
+                &CheckMenuItem::with_id(app, "autostart-toggle", "Iniciar con el sistema", true, autostart_on, None::<&str>)?,
+                &MenuItem::with_id(app, "check-update", "Buscar actualización…", true, None::<&str>)?,
+                &PredefinedMenuItem::separator(app)?,
+                &MenuItem::with_id(app, "version", &version, false, None::<&str>)?,
+                &MenuItem::with_id(app, "quit-app", "Salir de Labstream OS", true, None::<&str>)?,
+            ],
+        )?)
+    };
+    if let Ok(menu) = build() {
+        let _ = win.popup_menu(&menu);
+    }
+}
+
+// Activa/desactiva el arranque con el sistema y RECUERDA la elección (si no, el arranque
+// la re-activaba en cada apertura).
+fn toggle_autostart<R: Runtime>(app: &AppHandle<R>) {
+    let mgr = app.autolaunch();
+    let was_on = mgr.is_enabled().unwrap_or(false);
+    let _ = if was_on { mgr.disable() } else { mgr.enable() };
+    {
+        let shell = app.state::<ShellState>();
+        shell.lock().unwrap().autostart = Some(!was_on);
+    }
+    save_persisted(app);
+    let _ = app
+        .notification()
+        .builder()
+        .title("Labstream OS")
+        .body(if was_on {
+            "Ya no se iniciará con el sistema."
+        } else {
+            "Se iniciará automáticamente con el sistema."
+        })
+        .show();
+}
+
+// "Buscar actualización…" del menú: como la silenciosa, pero SIEMPRE responde con un aviso
+// (instalando / ya estás al día / sin red).
+#[cfg(desktop)]
+async fn check_update_manual(handle: tauri::AppHandle) {
+    use tauri_plugin_updater::UpdaterExt;
+    let notify = |body: String| {
+        let _ = handle.notification().builder().title("Labstream OS").body(body).show();
+    };
+    let Ok(updater) = handle.updater() else {
+        notify("El actualizador no está disponible en esta instalación.".into());
+        return;
+    };
+    match updater.check().await {
+        Ok(Some(update)) => {
+            notify(format!("Instalando la versión {}…", update.version));
+            if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
+                handle.restart();
+            } else {
+                notify("No se pudo instalar la actualización. Intenta de nuevo más tarde.".into());
+            }
+        }
+        Ok(None) => notify(format!("Estás en la última versión ({}).", handle.package_info().version)),
+        Err(_) => notify("No se pudo comprobar la actualización (revisa la red).".into()),
+    }
+}
+
 // Muestra y enfoca la ventana principal (tray, dock, segunda instancia).
 fn show_main<R: Runtime>(app: &AppHandle<R>) {
     if let Some(w) = main_window(app) {
@@ -538,8 +632,19 @@ pub fn run() {
     let app = builder
         .manage(ShellState::default())
         .setup(|app| {
-            // Arranque automático al iniciar sesión (idempotente).
-            let _ = app.autolaunch().enable();
+            let handle = app.handle().clone();
+            let saved = load_persisted(&handle);
+
+            // Arranque automático al iniciar sesión: por defecto activado, pero se respeta
+            // lo que el usuario elija en el menú ⋮ ("Iniciar con el sistema").
+            match saved.autostart {
+                Some(false) => {
+                    let _ = app.autolaunch().disable();
+                }
+                _ => {
+                    let _ = app.autolaunch().enable();
+                }
+            }
 
             // Al abrir, busca una actualización en segundo plano (no bloquea el arranque).
             #[cfg(desktop)]
@@ -548,13 +653,12 @@ pub fn run() {
                 tauri::async_runtime::spawn(check_update(handle));
             }
 
-            let handle = app.handle().clone();
-            let saved = load_persisted(&handle);
             {
                 let shell = handle.state::<ShellState>();
                 let mut s = shell.lock().unwrap();
                 s.zoom_idx = saved.zoom_idx.unwrap_or(ZOOM_100).min(ZOOM_STEPS.len() - 1);
                 s.win = saved.win;
+                s.autostart = saved.autostart;
             }
 
             // Ventana principal (contenedora). Tamaño/posición de la sesión anterior si los hay.
@@ -582,6 +686,8 @@ pub fn run() {
                     "Labstream OS",
                     true,
                     &[
+                        &MenuItem::with_id(h, "check-update", "Buscar actualización…", true, None::<&str>)?,
+                        &PredefinedMenuItem::separator(h)?,
                         &PredefinedMenuItem::hide(h, Some("Ocultar Labstream OS"))?,
                         &PredefinedMenuItem::hide_others(h, Some("Ocultar otros"))?,
                         &PredefinedMenuItem::show_all(h, Some("Mostrar todo"))?,
@@ -596,6 +702,8 @@ pub fn run() {
                     &[
                         &MenuItem::with_id(h, "new-tab", "Nueva pestaña", true, Some("CmdOrCtrl+T"))?,
                         &MenuItem::with_id(h, "close-tab", "Cerrar pestaña", true, Some("CmdOrCtrl+W"))?,
+                        &PredefinedMenuItem::separator(h)?,
+                        &MenuItem::with_id(h, "open-browser", "Abrir esta página en el navegador", true, None::<&str>)?,
                     ],
                 )?;
                 let edicion = Submenu::with_items(
@@ -637,20 +745,36 @@ pub fn run() {
                 )?;
                 let menu = Menu::with_items(h, &[&app_menu, &archivo, &edicion, &vista, &ventana])?;
                 app.set_menu(menu)?;
-                app.on_menu_event(|app, event| match event.id().as_ref() {
-                    "new-tab" => create_tab(app, None, true),
-                    "close-tab" => {
-                        if let Some(l) = active_label(app) {
-                            close_tab(app, &l);
-                        }
-                    }
-                    "reload" => reload_tab(app, None),
-                    "zoom-in" => zoom_step(app, 1),
-                    "zoom-out" => zoom_step(app, -1),
-                    "zoom-0" => zoom_step(app, 0),
-                    _ => {}
-                });
             }
+
+            // Manejador de TODOS los menús (el de macOS y el popup ⋮ de ambas plataformas).
+            app.on_menu_event(|app, event| match event.id().as_ref() {
+                "new-tab" => create_tab(app, None, true),
+                "close-tab" => {
+                    if let Some(l) = active_label(app) {
+                        close_tab(app, &l);
+                    }
+                }
+                "reload" => reload_tab(app, None),
+                "zoom-in" => zoom_step(app, 1),
+                "zoom-out" => zoom_step(app, -1),
+                "zoom-0" => zoom_step(app, 0),
+                "open-browser" => {
+                    if let Some(url) = active_url(app) {
+                        let _ = app.opener().open_url(url, None::<&str>);
+                    }
+                }
+                "autostart-toggle" => toggle_autostart(app),
+                "check-update" => {
+                    #[cfg(desktop)]
+                    tauri::async_runtime::spawn(check_update_manual(app.clone()));
+                }
+                "quit-app" => {
+                    save_persisted(app);
+                    app.exit(0);
+                }
+                _ => {}
+            });
 
             // Barra de pestañas (webview local, arriba).
             let scale = win.scale_factor().unwrap_or(1.0);
@@ -732,6 +856,10 @@ pub fn run() {
                 if let Some(n) = field_i64(e.payload(), "n") {
                     activate_nth(&h, n.max(1) as usize);
                 }
+            });
+            let h = handle.clone();
+            handle.listen_any("ls-menu", move |_| {
+                show_app_menu(&h);
             });
             let h = handle.clone();
             handle.listen_any("ls-title", move |e| {
