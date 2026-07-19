@@ -146,6 +146,16 @@
         font-size: 11.5px;
       }
       #z-pct.activo { color: var(--accent); font-weight: 600; }
+      #version {
+        flex: 0 0 auto;
+        margin: 2px 0 7px;
+        padding: 0 7px;
+        color: var(--muted);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      #version:hover { color: var(--accent); }
     </style>
   </head>
   <body>
@@ -158,6 +168,7 @@
         <button id="z-pct" title="Restablecer zoom (⌘/Ctrl+0)">100%</button>
         <button id="z-mas" title="Acercar (⌘/Ctrl++)">+</button>
       </div>
+      <button id="version" title="Versión de la app · clic: buscar actualización"></button>
       <button class="icono" id="menu" title="Opciones de la app">⋮</button>
     </div>
     <script>
@@ -171,6 +182,7 @@
 
       const $tabs = document.getElementById("tabs");
       const $pct = document.getElementById("z-pct");
+      const $ver = document.getElementById("version");
 
       function render() {
         $tabs.textContent = "";
@@ -206,6 +218,7 @@
 
         $pct.textContent = estado.zoom + "%";
         $pct.classList.toggle("activo", estado.zoom !== 100);
+        $ver.textContent = estado.version ? "v" + estado.version : "";
       }
 
       if (E) {
@@ -219,6 +232,7 @@
       document.getElementById("recargar").addEventListener("click", () => emitir("ls-reload", {}));
       // Menú de OPCIONES de la app (nativo, lo pinta Rust): botón ⋮ o clic derecho en la barra.
       document.getElementById("menu").addEventListener("click", () => emitir("ls-menu", {}));
+      $ver.addEventListener("click", () => emitir("ls-check-update", {}));
       document.getElementById("bar").addEventListener("contextmenu", (e) => {
         e.preventDefault();
         emitir("ls-menu", {});

@@ -269,7 +269,7 @@ fn current_zoom<R: Runtime>(app: &AppHandle<R>) -> f64 {
     ZOOM_STEPS[s.zoom_idx.min(ZOOM_STEPS.len() - 1)]
 }
 
-// Manda el estado de pestañas + zoom a la barra (webview "chrome").
+// Manda el estado de pestañas + zoom + versión a la barra (webview "chrome").
 fn broadcast<R: Runtime>(app: &AppHandle<R>) {
     let payload = {
         let shell = app.state::<ShellState>();
@@ -280,7 +280,11 @@ fn broadcast<R: Runtime>(app: &AppHandle<R>) {
             .enumerate()
             .map(|(i, t)| json!({ "label": t.label, "title": t.title, "active": i == s.active }))
             .collect();
-        json!({ "tabs": tabs, "zoom": (ZOOM_STEPS[s.zoom_idx.min(ZOOM_STEPS.len()-1)] * 100.0).round() as u32 })
+        json!({
+            "tabs": tabs,
+            "zoom": (ZOOM_STEPS[s.zoom_idx.min(ZOOM_STEPS.len()-1)] * 100.0).round() as u32,
+            "version": app.package_info().version.to_string(),
+        })
     };
     let _ = app.emit_to(EventTarget::webview(CHROME), "ls-tabs", payload);
 }
@@ -860,6 +864,12 @@ pub fn run() {
             let h = handle.clone();
             handle.listen_any("ls-menu", move |_| {
                 show_app_menu(&h);
+            });
+            // Clic en la etiqueta de versión de la barra → buscar actualización (con aviso).
+            let h = handle.clone();
+            handle.listen_any("ls-check-update", move |_| {
+                #[cfg(desktop)]
+                tauri::async_runtime::spawn(check_update_manual(h.clone()));
             });
             let h = handle.clone();
             handle.listen_any("ls-title", move |e| {
