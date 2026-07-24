@@ -17,6 +17,11 @@
 //   - plugin `updater`: busca versión nueva en los Releases de GitHub y se actualiza sola.
 //   - bandeja (tray) + "cerrar = ocultar": sigue corriendo y notificando en segundo plano.
 // Y lo nuevo:
+//   - ATRÁS/ADELANTE: botones ← → en la barra, ⌘[ / ⌘] (Alt+←/→ en Windows) y menú
+//     Historial (macOS). Antes una página sin menú propio era un callejón sin salida.
+//   - «Reabrir pestaña cerrada» (⌘/Ctrl+Shift+T), como en el navegador.
+//   - Globo de NO-LEÍDOS en el icono (evento `ls-badge` desde la web app): número en el
+//     Dock (macOS), punto rojo en la barra de tareas (Windows) y tooltip de la bandeja.
 //   - ZOOM de interfaz (Cmd/Ctrl +/−/0 y Ctrl+rueda) con persistencia entre sesiones.
 //   - Sesión restaurada: al reabrir vuelve con las mismas pestañas y tamaño de ventana.
 //   - single-instance (solo release): abrir la app de nuevo enfoca la ventana existente.
@@ -66,11 +71,12 @@ struct Shell {
     next_id: u64,
     win: Option<WinRect>,
     autostart: Option<bool>, // elección del usuario en el menú ⋮ (None = por defecto, activado)
+    closed: Vec<String>,     // URLs de pestañas cerradas (para «Reabrir pestaña cerrada», ⌘⇧T)
 }
 
 impl Default for Shell {
     fn default() -> Self {
-        Self { tabs: Vec::new(), active: 0, zoom_idx: ZOOM_100, next_id: 1, win: None, autostart: None }
+        Self { tabs: Vec::new(), active: 0, zoom_idx: ZOOM_100, next_id: 1, win: None, autostart: None, closed: Vec::new() }
     }
 }
 
@@ -216,14 +222,31 @@ const INIT_JS_TPL: &str = r#"
     var mod = e.metaKey || e.ctrlKey;
     if (!mod) return;
     var k = e.key;
-    if (k === 't' || k === 'T') { e.preventDefault(); newTab(null); }
+    if (k === 't' || k === 'T') {
+      e.preventDefault();
+      if (e.shiftKey) emit('ls-reopen', {}); else newTab(null);
+    }
     else if (k === 'w' || k === 'W') { e.preventDefault(); emit('ls-close-tab', { label: LABEL }); }
     else if ((k === 'r' || k === 'R') && !e.shiftKey) { e.preventDefault(); location.reload(); }
+    else if (k === '[') { e.preventDefault(); history.back(); }
+    else if (k === ']') { e.preventDefault(); history.forward(); }
     else if (k === '=' || k === '+') { e.preventDefault(); emit('ls-zoom', { dir: 1 }); }
     else if (k === '-') { e.preventDefault(); emit('ls-zoom', { dir: -1 }); }
     else if (k === '0') { e.preventDefault(); emit('ls-zoom', { dir: 0 }); }
     else if (k === 'Tab') { e.preventDefault(); emit('ls-cycle', { dir: e.shiftKey ? -1 : 1 }); }
     else if (k >= '1' && k <= '9') { e.preventDefault(); emit('ls-activate-n', { n: +k }); }
+  }, true);
+
+  // Alt+←/→ = atrás/adelante (convención de Windows/Linux; en Mac es ⌘[ / ⌘] y Alt+flecha
+  // se respeta para saltar palabras al escribir). Fuera de campos de texto solamente.
+  var MAC = /Mac/i.test(navigator.platform || '');
+  function editable(el) {
+    return !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName || ''));
+  }
+  addEventListener('keydown', function (e) {
+    if (MAC || !e.altKey || e.metaKey || e.ctrlKey || e.shiftKey || editable(e.target)) return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); history.back(); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); history.forward(); }
   }, true);
 
   // Ctrl+rueda = zoom (convención de navegador; en Mac también con Ctrl).
@@ -383,6 +406,12 @@ fn close_tab<R: Runtime>(app: &AppHandle<R>, label: &str) {
         let mut s = shell.lock().unwrap();
         let Some(i) = s.tabs.iter().position(|t| t.label == label) else { return };
         let was_active = i == s.active;
+        // Recuerda la URL para «Reabrir pestaña cerrada» (tope de 20, las más recientes).
+        let url = s.tabs[i].url.clone();
+        s.closed.push(url);
+        if s.closed.len() > 20 {
+            s.closed.remove(0);
+        }
         s.tabs.remove(i);
         if s.tabs.is_empty() {
             s.active = 0;
@@ -489,6 +518,67 @@ fn active_url<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
     s.tabs.get(s.active).map(|t| t.url.clone())
 }
 
+// Atrás/adelante en el HISTORIAL de la pestaña activa. Antes no existía por ningún lado y
+// una página sin menú propio (p. ej. el portal de revisión) era un callejón sin salida.
+fn nav_tab<R: Runtime>(app: &AppHandle<R>, dir: i32) {
+    if let Some(l) = active_label(app) {
+        if let Some(wv) = get_webview(app, &l) {
+            let _ = wv.eval(if dir < 0 { "history.back()" } else { "history.forward()" });
+        }
+    }
+}
+
+// «Reabrir pestaña cerrada» (⌘/Ctrl+Shift+T): la más reciente primero, como en el navegador.
+fn reopen_tab<R: Runtime>(app: &AppHandle<R>) {
+    let url = {
+        let shell = app.state::<ShellState>();
+        let mut s = shell.lock().unwrap();
+        s.closed.pop()
+    };
+    if let Some(u) = url {
+        create_tab(app, Some(u), true);
+    }
+}
+
+// Punto rojo para el icono de la barra de tareas de Windows (dibujado a mano: sin assets).
+#[cfg(target_os = "windows")]
+fn red_dot() -> tauri::image::Image<'static> {
+    const S: usize = 16;
+    let mut px = vec![0u8; S * S * 4];
+    let c = (S as f64 - 1.0) / 2.0;
+    for y in 0..S {
+        for x in 0..S {
+            let (dx, dy) = (x as f64 - c, y as f64 - c);
+            if (dx * dx + dy * dy).sqrt() <= c {
+                let i = (y * S + x) * 4;
+                px[i] = 225;
+                px[i + 1] = 29;
+                px[i + 2] = 72;
+                px[i + 3] = 255;
+            }
+        }
+    }
+    tauri::image::Image::new_owned(px, S as u32, S as u32)
+}
+
+// Globo de NO-LEÍDOS en el icono, alimentado por la web app (evento `ls-badge {count}`):
+// macOS = número en el icono del Dock; Windows = punto rojo sobre el icono de la barra de
+// tareas; y en ambos, el tooltip de la bandeja dice cuántos hay.
+fn set_badge<R: Runtime>(app: &AppHandle<R>, count: i64) {
+    if let Some(win) = main_window(app) {
+        #[cfg(target_os = "macos")]
+        let _ = win.set_badge_count(if count > 0 { Some(count) } else { None });
+        #[cfg(target_os = "windows")]
+        let _ = win.set_overlay_icon(if count > 0 { Some(red_dot()) } else { None });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = &win;
+    }
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let tip = if count > 0 { format!("Labstream OS — {count} sin leer") } else { "Labstream OS".to_string() };
+        let _ = tray.set_tooltip(Some(tip));
+    }
+}
+
 // Menú de OPCIONES de la app (botón ⋮ / clic derecho en la barra): un popup NATIVO del sistema,
 // igual en Windows y macOS. Se construye fresco en cada apertura para que el check de
 // "Iniciar con el sistema" y la versión estén siempre al día. Solo opciones del SHELL — la web
@@ -501,8 +591,12 @@ fn show_app_menu<R: Runtime>(app: &AppHandle<R>) {
         Ok(Menu::with_items(
             app,
             &[
+                &MenuItem::with_id(app, "nav-back", "Atrás", true, Some("CmdOrCtrl+["))?,
+                &MenuItem::with_id(app, "nav-forward", "Adelante", true, Some("CmdOrCtrl+]"))?,
+                &PredefinedMenuItem::separator(app)?,
                 &MenuItem::with_id(app, "new-tab", "Nueva pestaña", true, Some("CmdOrCtrl+T"))?,
                 &MenuItem::with_id(app, "close-tab", "Cerrar pestaña", true, Some("CmdOrCtrl+W"))?,
+                &MenuItem::with_id(app, "reopen-tab", "Reabrir pestaña cerrada", true, Some("CmdOrCtrl+Shift+T"))?,
                 &MenuItem::with_id(app, "reload", "Recargar", true, Some("CmdOrCtrl+R"))?,
                 &PredefinedMenuItem::separator(app)?,
                 &MenuItem::with_id(app, "zoom-in", "Acercar", true, Some("CmdOrCtrl+="))?,
@@ -706,6 +800,7 @@ pub fn run() {
                     &[
                         &MenuItem::with_id(h, "new-tab", "Nueva pestaña", true, Some("CmdOrCtrl+T"))?,
                         &MenuItem::with_id(h, "close-tab", "Cerrar pestaña", true, Some("CmdOrCtrl+W"))?,
+                        &MenuItem::with_id(h, "reopen-tab", "Reabrir pestaña cerrada", true, Some("CmdOrCtrl+Shift+T"))?,
                         &PredefinedMenuItem::separator(h)?,
                         &MenuItem::with_id(h, "open-browser", "Abrir esta página en el navegador", true, None::<&str>)?,
                     ],
@@ -738,6 +833,15 @@ pub fn run() {
                         &PredefinedMenuItem::fullscreen(h, Some("Pantalla completa"))?,
                     ],
                 )?;
+                let historial = Submenu::with_items(
+                    h,
+                    "Historial",
+                    true,
+                    &[
+                        &MenuItem::with_id(h, "nav-back", "Atrás", true, Some("CmdOrCtrl+["))?,
+                        &MenuItem::with_id(h, "nav-forward", "Adelante", true, Some("CmdOrCtrl+]"))?,
+                    ],
+                )?;
                 let ventana = Submenu::with_items(
                     h,
                     "Ventana",
@@ -747,18 +851,21 @@ pub fn run() {
                         &PredefinedMenuItem::maximize(h, Some("Zoom"))?,
                     ],
                 )?;
-                let menu = Menu::with_items(h, &[&app_menu, &archivo, &edicion, &vista, &ventana])?;
+                let menu = Menu::with_items(h, &[&app_menu, &archivo, &edicion, &vista, &historial, &ventana])?;
                 app.set_menu(menu)?;
             }
 
             // Manejador de TODOS los menús (el de macOS y el popup ⋮ de ambas plataformas).
             app.on_menu_event(|app, event| match event.id().as_ref() {
+                "nav-back" => nav_tab(app, -1),
+                "nav-forward" => nav_tab(app, 1),
                 "new-tab" => create_tab(app, None, true),
                 "close-tab" => {
                     if let Some(l) = active_label(app) {
                         close_tab(app, &l);
                     }
                 }
+                "reopen-tab" => reopen_tab(app),
                 "reload" => reload_tab(app, None),
                 "zoom-in" => zoom_step(app, 1),
                 "zoom-out" => zoom_step(app, -1),
@@ -860,6 +967,21 @@ pub fn run() {
                 if let Some(n) = field_i64(e.payload(), "n") {
                     activate_nth(&h, n.max(1) as usize);
                 }
+            });
+            let h = handle.clone();
+            handle.listen_any("ls-nav", move |e| {
+                let dir = field_i64(e.payload(), "dir").unwrap_or(-1) as i32;
+                nav_tab(&h, dir);
+            });
+            let h = handle.clone();
+            handle.listen_any("ls-reopen", move |_| {
+                reopen_tab(&h);
+            });
+            // Globo de no-leídos: lo emite la web app cuando cambia el conteo del chat.
+            let h = handle.clone();
+            handle.listen_any("ls-badge", move |e| {
+                let n = field_i64(e.payload(), "count").unwrap_or(0);
+                set_badge(&h, n);
             });
             let h = handle.clone();
             handle.listen_any("ls-menu", move |_| {

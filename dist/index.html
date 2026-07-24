@@ -160,6 +160,8 @@
   </head>
   <body>
     <div id="bar">
+      <button class="icono" id="atras" title="Atrás (⌘/Ctrl+[)">←</button>
+      <button class="icono" id="adelante" title="Adelante (⌘/Ctrl+])">→</button>
       <div id="tabs" title=""></div>
       <button class="icono" id="nueva" title="Nueva pestaña (⌘/Ctrl+T)">+</button>
       <button class="icono" id="recargar" title="Recargar (⌘/Ctrl+R)">⟳</button>
@@ -228,6 +230,8 @@
         });
       }
 
+      document.getElementById("atras").addEventListener("click", () => emitir("ls-nav", { dir: -1 }));
+      document.getElementById("adelante").addEventListener("click", () => emitir("ls-nav", { dir: 1 }));
       document.getElementById("nueva").addEventListener("click", () => emitir("ls-new-tab", {}));
       document.getElementById("recargar").addEventListener("click", () => emitir("ls-reload", {}));
       // Menú de OPCIONES de la app (nativo, lo pinta Rust): botón ⋮ o clic derecho en la barra.
@@ -250,9 +254,11 @@
         const mod = e.metaKey || e.ctrlKey;
         if (!mod) return;
         const k = e.key;
-        if (k === "t" || k === "T") { e.preventDefault(); emitir("ls-new-tab", {}); }
+        if (k === "t" || k === "T") { e.preventDefault(); emitir(e.shiftKey ? "ls-reopen" : "ls-new-tab", {}); }
         else if (k === "w" || k === "W") { e.preventDefault(); emitir("ls-close-tab", {}); }
         else if ((k === "r" || k === "R") && !e.shiftKey) { e.preventDefault(); emitir("ls-reload", {}); }
+        else if (k === "[") { e.preventDefault(); emitir("ls-nav", { dir: -1 }); }
+        else if (k === "]") { e.preventDefault(); emitir("ls-nav", { dir: 1 }); }
         else if (k === "=" || k === "+") { e.preventDefault(); emitir("ls-zoom", { dir: 1 }); }
         else if (k === "-") { e.preventDefault(); emitir("ls-zoom", { dir: -1 }); }
         else if (k === "0") { e.preventDefault(); emitir("ls-zoom", { dir: 0 }); }
