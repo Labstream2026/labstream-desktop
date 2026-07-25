@@ -2,14 +2,22 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Permisos del shell de escritorio: la barra local (chrome) y las pestañas remotas (tab-*).",
-  "windows": ["main"],
-  "webviews": ["chrome", "tab-*"],
+  "windows": [
+    "main"
+  ],
+  "webviews": [
+    "chrome",
+    "tab-*"
+  ],
   "remote": {
-    "urls": ["https://os.labstreamsas.com"]
+    "urls": [
+      "https://os.labstreamsas.com"
+    ]
   },
   "permissions": [
     "core:default",
     "opener:default",
-    "notification:default"
+    "notification:default",
+    "core:window:allow-start-dragging"
   ]
 }

@@ -7,8 +7,12 @@
     <!--
       Barra de pestañas del shell de escritorio (webview "chrome", local).
       Habla con Rust por eventos (__TAURI__.event):
-        recibe  ls-tabs      {tabs:[{label,title,active}], zoom}
-        emite   ls-ready, ls-new-tab, ls-activate, ls-close-tab, ls-reload, ls-zoom, ls-cycle, ls-activate-n
+        recibe  ls-tabs      {tabs:[{label,title,url,loading,active}], zoom, version, mac}
+        emite   ls-ready, ls-new-tab, ls-activate, ls-close-tab, ls-reload, ls-zoom, ls-cycle,
+                ls-activate-n, ls-nav, ls-menu, ls-check-update, ls-tab-menu, ls-reorder
+      En macOS la ventana lleva el título en OVERLAY: esta barra ES la fila del título, así que
+      deja libre el hueco del semáforo (clase `mac`) y el espacio vacío arrastra la ventana
+      (`data-tauri-drag-region`). En Windows hay título nativo aparte y no se reserva nada.
     -->
     <style>
       /* Paleta estilo Chrome: la barra es una FRANJA más oscura y la pestaña activa es una
@@ -59,6 +63,8 @@
         padding: 0 6px 0 8px;
         border-bottom: 1px solid var(--border);
       }
+      /* macOS: hueco para los botones rojo/amarillo/verde, que son NATIVOS y se pintan encima. */
+      body.mac #bar { padding-left: 78px; }
       #tabs {
         display: flex;
         align-items: flex-end;
@@ -69,16 +75,16 @@
         align-self: stretch;
         margin-bottom: -1px;
         padding: 0 4px;
-        overflow-x: auto;
-        scrollbar-width: none;
+        overflow: hidden;
       }
-      #tabs::-webkit-scrollbar { display: none; }
       .tab {
         display: flex;
         align-items: center;
         gap: 7px;
-        flex: 0 1 220px;
-        min-width: 100px;
+        /* Elástico como en Chrome: se reparten el ancho y se encogen al abrir más. */
+        flex: 1 1 220px;
+        min-width: 42px;
+        max-width: 240px;
         height: 30px;
         margin-bottom: 5px;
         padding: 0 6px 0 10px;
@@ -129,11 +135,31 @@
         right: -8px;
         background: radial-gradient(circle at 8px 0, transparent 8px, var(--tab-active-bg) 8.5px);
       }
+      /* Reordenar arrastrando: NO se usa drag&drop de HTML5 (en el webview de la barra en
+         macOS los eventos no llegan), sino eventos de puntero. Se apaga el arrastre nativo de
+         WebKit para que no salga la imagen fantasma al mover una pestaña. */
+      .tab { -webkit-user-drag: none; }
+      .tab.arrastrando { opacity: 0.5; }
       .tab .favicon {
         flex: 0 0 auto;
-        width: 14px;
-        height: 14px;
-        border-radius: 3px;
+        width: 15px;
+        height: 15px;
+        display: grid;
+        place-items: center;
+        font-size: 12.5px;
+        line-height: 1;
+      }
+      /* Señal de carga: el icono se sustituye por un aro girando. */
+      .tab .favicon.cargando {
+        border: 1.6px solid var(--sep);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: giro 0.7s linear infinite;
+        font-size: 0;
+      }
+      @keyframes giro { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) {
+        .tab .favicon.cargando { animation-duration: 2.4s; }
       }
       .tab .titulo {
         flex: 1 1 auto;
@@ -156,6 +182,11 @@
       }
       .tab:hover .cerrar, .tab.active .cerrar { visibility: visible; }
       .tab .cerrar:hover { background: var(--btn-hover); color: var(--tab-active-fg); }
+      /* Muchas pestañas abiertas: solo el icono (el nombre completo queda en el tooltip),
+         y la × únicamente en la activa — como hace Chrome al quedarse sin sitio. */
+      #tabs.compactas .tab { padding: 0 6px; justify-content: center; }
+      #tabs.compactas .tab .titulo { display: none; }
+      #tabs.compactas .tab:not(.active) .cerrar { display: none; }
       button {
         appearance: none;
         border: 0;
@@ -171,7 +202,7 @@
       .icono {
         flex: 0 0 auto;
         width: 30px;
-        margin: 2px 0 7px;
+        height: 26px;
         font-size: 15px;
       }
       #zoom {
@@ -179,35 +210,38 @@
         display: flex;
         align-items: center;
         gap: 1px;
-        margin: 2px 0 7px;
       }
-      #zoom button { height: 100%; }
-      #z-menos, #z-mas { width: 26px; font-size: 14px; }
+      #z-menos, #z-mas { width: 26px; height: 26px; font-size: 14px; }
       #z-pct {
         min-width: 44px;
+        height: 26px;
         padding: 0 4px;
         font-variant-numeric: tabular-nums;
         color: var(--muted);
         font-size: 11.5px;
+        border-radius: 13px;
       }
       #z-pct.activo { color: var(--accent); font-weight: 600; }
       #version {
         flex: 0 0 auto;
-        margin: 2px 0 7px;
+        height: 26px;
         padding: 0 7px;
         color: var(--muted);
         font-size: 11px;
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
+        border-radius: 13px;
       }
       #version:hover { color: var(--accent); }
     </style>
   </head>
   <body>
-    <div id="bar">
+    <!-- data-tauri-drag-region: el hueco libre de la barra mueve la ventana y el doble clic
+         la maximiza (en macOS ya no hay barra de título nativa de la que tirar). -->
+    <div id="bar" data-tauri-drag-region>
       <button class="icono" id="atras" title="Atrás (⌘/Ctrl+[)">←</button>
       <button class="icono" id="adelante" title="Adelante (⌘/Ctrl+])">→</button>
-      <div id="tabs" title=""></div>
+      <div id="tabs" data-tauri-drag-region></div>
       <button class="icono" id="nueva" title="Nueva pestaña (⌘/Ctrl+T)">+</button>
       <button class="icono" id="recargar" title="Recargar (⌘/Ctrl+R)">⟳</button>
       <div id="zoom">
@@ -231,31 +265,136 @@
       const $pct = document.getElementById("z-pct");
       const $ver = document.getElementById("version");
 
-      // Favicon de las pestañas (look Chrome): mini logo Labstream en SVG inline —
-      // cuadrado indigo con la "L" — para no depender de archivos ni de la red.
-      const FAVICON = "data:image/svg+xml," + encodeURIComponent(
-        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>" +
-        "<rect width='16' height='16' rx='4' fill='#6366f1'/>" +
-        "<path d='M5.2 3.8v7h5.6' stroke='#fff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round' fill='none'/>" +
-        "</svg>",
-      );
+      // Nombre + icono de cada pestaña a partir de su RUTA (mismas etiquetas que la barra
+      // superior de la web). Sin esto todas las pestañas se llamaban «(25) Labstream OS» y
+      // no había forma de distinguirlas.
+      const RUTAS = [
+        [/^\/$/, "🏠", "Inicio"],
+        [/^\/inicio/, "🏠", "Inicio"],
+        [/^\/mis-tareas/, "✅", "Mis tareas"],
+        [/^\/mis-entregas/, "📦", "Mis entregas"],
+        [/^\/estados/, "💬", "Chat del día"],
+        [/^\/chat/, "💬", "Chats"],
+        [/^\/notas/, "📝", "Notas"],
+        [/^\/recordatorios/, "⏰", "Recordatorios"],
+        [/^\/proyectos\/nuevo/, "✨", "Nuevo proyecto"],
+        [/^\/proyectos\/[^/]+/, "🎬", "Proyecto"],
+        [/^\/proyectos/, "🎬", "Proyectos"],
+        [/^\/plantillas/, "🗂️", "Plantillas"],
+        [/^\/calendario/, "📅", "Calendario"],
+        [/^\/wiki\/inventario/, "📦", "Inventario"],
+        [/^\/wiki\/ubicacion/, "📍", "Ubicación"],
+        [/^\/wiki/, "📚", "Wiki"],
+        [/^\/clientes\/nuevo/, "✨", "Nuevo cliente"],
+        [/^\/clientes\/[^/]+/, "👤", "Cliente"],
+        [/^\/clientes/, "👤", "Clientes"],
+        [/^\/operaciones/, "🗄️", "Operaciones"],
+        [/^\/revisiones/, "🎞️", "Revisiones"],
+        [/^\/entregas-finales/, "🏁", "Entregas finales"],
+        [/^\/cotizaciones/, "🧾", "Cotizaciones"],
+        [/^\/propuestas/, "📄", "Propuestas"],
+        [/^\/facturacion/, "💵", "Facturación"],
+        [/^\/comercial/, "📈", "Comercial"],
+        [/^\/biblioteca/, "📚", "Biblioteca"],
+        [/^\/reportes/, "📊", "Reportes"],
+        [/^\/timeline/, "🧭", "Cronograma"],
+        [/^\/asistente/, "🤖", "Marcebot"],
+        [/^\/configuracion/, "⚙️", "Configuración"],
+        [/^\/ajustes/, "⚙️", "Ajustes"],
+        [/^\/perfil/, "👤", "Mi perfil"],
+        [/^\/papelera/, "🗑️", "Papelera"],
+        [/^\/docs\//, "📄", "Documento"],
+      ];
+
+      function rutaMeta(url) {
+        let ruta = "/";
+        try { ruta = new URL(url).pathname; } catch (e) {}
+        for (const [re, emoji, nombre] of RUTAS) {
+          if (re.test(ruta)) return { emoji, nombre };
+        }
+        return { emoji: "🗂️", nombre: "Labstream OS" };
+      }
+
+      // El título de la web es «(25) Labstream OS» en todas las páginas: se le quita el
+      // contador de no leídos y el nombre de la app. Si queda algo propio, ese manda (así,
+      // el día que la web ponga títulos por página, la barra los aprovecha sola).
+      function limpiarTitulo(t) {
+        if (!t) return "";
+        let x = String(t).replace(/^\(\d+\)\s*/, "").trim();
+        x = x.replace(/\s*[·|—–-]\s*Labstream(\s+OS)?\s*$/i, "").trim();
+        return /^labstream(\s+os)?$/i.test(x) ? "" : x;
+      }
+
+      function nombreDe(t) {
+        const meta = rutaMeta(t.url || "");
+        return { emoji: meta.emoji, texto: limpiarTitulo(t.title) || meta.nombre };
+      }
+
+      // Reordenar arrastrando, con eventos de PUNTERO: el drag&drop de HTML5 no llega al
+      // webview de la barra en macOS. Se mueve el nodo en vivo y al soltar se manda el orden.
+      let arrastre = null;     // {el, x0, movido}
+      let tragarClick = false; // el clic que cierra el arrastre no debe activar la pestaña
+
+      function ordenActual() {
+        return Array.from($tabs.children).map((el) => el.dataset.label);
+      }
+
+      addEventListener("mousemove", (e) => {
+        if (!arrastre) return;
+        if (!arrastre.movido) {
+          if (Math.abs(e.clientX - arrastre.x0) < 5) return; // todavía es un clic, no un arrastre
+          arrastre.movido = true;
+          arrastre.el.classList.add("arrastrando");
+        }
+        for (const otro of Array.from($tabs.children)) {
+          if (otro === arrastre.el) continue;
+          const r = otro.getBoundingClientRect();
+          if (e.clientX >= r.left && e.clientX <= r.right) {
+            const despues = e.clientX > r.left + r.width / 2;
+            $tabs.insertBefore(arrastre.el, despues ? otro.nextSibling : otro);
+            break;
+          }
+        }
+      });
+
+      addEventListener("mouseup", () => {
+        if (!arrastre) return;
+        const { el, movido } = arrastre;
+        arrastre = null;
+        el.classList.remove("arrastrando");
+        if (movido) {
+          tragarClick = true;
+          emitir("ls-reorder", { order: ordenActual().join(",") });
+        }
+      });
+
+      // Modo solo-icono: se mide el ancho REAL de una pestaña ya pintada (el reparto lo hace
+      // flex, así que todas miden igual) en vez de estimarlo dividiendo el contenedor.
+      function ajustarCompactas() {
+        const primera = $tabs.firstElementChild;
+        if (!primera) return;
+        const ancho = primera.getBoundingClientRect().width;
+        if (!ancho) return;
+        $tabs.classList.toggle("compactas", ancho < 112);
+      }
 
       function render() {
         $tabs.textContent = "";
         for (const t of estado.tabs) {
+          const { emoji, texto } = nombreDe(t);
           const el = document.createElement("div");
           el.className = "tab" + (t.active ? " active" : "");
-          el.title = t.title;
+          el.dataset.label = t.label;
+          el.title = texto;
 
-          const fav = document.createElement("img");
-          fav.className = "favicon";
-          fav.src = FAVICON;
-          fav.alt = "";
+          const fav = document.createElement("span");
+          fav.className = "favicon" + (t.loading ? " cargando" : "");
+          fav.textContent = t.loading ? "" : emoji;
           el.appendChild(fav);
 
           const titulo = document.createElement("span");
           titulo.className = "titulo";
-          titulo.textContent = t.title || "Labstream OS";
+          titulo.textContent = texto;
           el.appendChild(titulo);
 
           const x = document.createElement("button");
@@ -268,19 +407,40 @@
           });
           el.appendChild(x);
 
-          el.addEventListener("click", () => emitir("ls-activate", { label: t.label }));
+          el.addEventListener("click", () => {
+            if (tragarClick) { tragarClick = false; return; } // veníamos de reordenar
+            emitir("ls-activate", { label: t.label });
+          });
           // Clic central sobre la pestaña = cerrarla (como en el navegador).
           el.addEventListener("auxclick", (e) => {
             if (e.button === 1) emitir("ls-close-tab", { label: t.label });
           });
+          // Clic derecho: menú NATIVO de la pestaña (duplicar, cerrar otras, copiar enlace…).
+          // La barra mide 40px: un menú dibujado aquí dentro quedaría recortado.
+          el.addEventListener("contextmenu", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            emitir("ls-tab-menu", { label: t.label });
+          });
+
+          // Reordenar arrastrando: lo gestionan los listeners de puntero de más arriba.
+          el.addEventListener("mousedown", (e) => {
+            if (e.button !== 0) return;
+            arrastre = { el, x0: e.clientX, movido: false };
+          });
+
           $tabs.appendChild(el);
         }
+        requestAnimationFrame(ajustarCompactas);
+
         const activa = $tabs.querySelector(".tab.active");
         if (activa) activa.scrollIntoView({ block: "nearest", inline: "nearest" });
 
         $pct.textContent = estado.zoom + "%";
         $pct.classList.toggle("activo", estado.zoom !== 100);
         $ver.textContent = estado.version ? "v" + estado.version : "";
+        // En macOS la barra ES la fila del título: hay que dejar libre el semáforo.
+        document.body.classList.toggle("mac", !!estado.mac);
       }
 
       if (E) {
@@ -289,6 +449,8 @@
           render();
         });
       }
+      // Al cambiar el ancho de la ventana se recalcula si caben los nombres.
+      addEventListener("resize", ajustarCompactas);
 
       document.getElementById("atras").addEventListener("click", () => emitir("ls-nav", { dir: -1 }));
       document.getElementById("adelante").addEventListener("click", () => emitir("ls-nav", { dir: 1 }));

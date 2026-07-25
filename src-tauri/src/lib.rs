@@ -46,14 +46,14 @@ use tauri::{
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_opener::OpenerExt;
 
 const SERVER_URL: &str = "https://os.labstreamsas.com";
 const TAB_BAR_H: f64 = 40.0; // alto lógico de la barra de pestañas (chrome)
 const CHROME: &str = "chrome";
-// Alto de la barra de título nativa de macOS (ventana estándar). Ver `top_offset`.
-#[cfg(target_os = "macos")]
-const MACOS_TITLEBAR_H: f64 = 28.0;
+// Hueco que ocupan los botones rojo/amarillo/verde en macOS: la barra deja libre ese
+// espacio a la izquierda (lo aplica el CSS de la barra con la bandera `mac` del payload).
 
 // Escalones de zoom (como un navegador). 1.0 = 100%.
 const ZOOM_STEPS: &[f64] = &[0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5];
@@ -65,6 +65,7 @@ struct TabRec {
     label: String,
     title: String,
     url: String,
+    loading: bool, // la barra pinta un giro en el icono mientras carga
 }
 
 struct Shell {
@@ -75,11 +76,12 @@ struct Shell {
     win: Option<WinRect>,
     autostart: Option<bool>, // elección del usuario en el menú ⋮ (None = por defecto, activado)
     closed: Vec<String>,     // URLs de pestañas cerradas (para «Reabrir pestaña cerrada», ⌘⇧T)
+    menu_tab: Option<String>, // pestaña sobre la que se abrió el menú de clic derecho
 }
 
 impl Default for Shell {
     fn default() -> Self {
-        Self { tabs: Vec::new(), active: 0, zoom_idx: ZOOM_100, next_id: 1, win: None, autostart: None, closed: Vec::new() }
+        Self { tabs: Vec::new(), active: 0, zoom_idx: ZOOM_100, next_id: 1, win: None, autostart: None, closed: Vec::new(), menu_tab: None }
     }
 }
 
@@ -271,40 +273,19 @@ fn get_webview<R: Runtime>(app: &AppHandle<R>, label: &str) -> Option<Webview<R>
     main_window(app).and_then(|w| w.webviews().into_iter().find(|v| v.label() == label))
 }
 
-// En macOS las coordenadas de los webviews HIJOS son relativas al MARCO de la ventana
-// (incluye la barra de título) y `inner_size()` devuelve también el marco. Sin compensar,
-// la barra de pestañas se dibuja DEBAJO del título nativo y solo asoman ~12 px (además el
-// título translúcido se teñía del color de la barra). Se detecta en caliente: si el marco y
-// el interior miden lo mismo hay que compensar; si Tauri lo corrige, la resta deja de ser 0
-// y no se compensa nada. En Windows/Linux siempre es 0 (ahí las coordenadas ya son del área
-// de cliente).
-fn top_offset<R: Runtime>(win: &Window<R>, scale: f64) -> f64 {
-    #[cfg(target_os = "macos")]
-    if let (Ok(outer), Ok(inner)) = (win.outer_size(), win.inner_size()) {
-        let o = outer.to_logical::<f64>(scale).height;
-        let i = inner.to_logical::<f64>(scale).height;
-        if (o - i).abs() < 1.0 {
-            return MACOS_TITLEBAR_H;
-        }
-    }
-    let _ = (win, scale);
-    0.0
-}
-
 // Geometría: barra arriba (alto fijo), contenido debajo ocupando el resto.
 fn layout_all<R: Runtime>(app: &AppHandle<R>) {
     let Some(win) = main_window(app) else { return };
     let scale = win.scale_factor().unwrap_or(1.0);
     let Ok(size) = win.inner_size() else { return };
     let size = size.to_logical::<f64>(scale);
-    let top = top_offset(&win, scale);
-    let content_h = (size.height - top - TAB_BAR_H).max(0.0);
+    let content_h = (size.height - TAB_BAR_H).max(0.0);
     for wv in win.webviews() {
         if wv.label() == CHROME {
-            let _ = wv.set_position(LogicalPosition::new(0.0, top));
+            let _ = wv.set_position(LogicalPosition::new(0.0, 0.0));
             let _ = wv.set_size(LogicalSize::new(size.width, TAB_BAR_H));
         } else {
-            let _ = wv.set_position(LogicalPosition::new(0.0, top + TAB_BAR_H));
+            let _ = wv.set_position(LogicalPosition::new(0.0, TAB_BAR_H));
             let _ = wv.set_size(LogicalSize::new(size.width, content_h));
         }
     }
@@ -325,15 +306,32 @@ fn broadcast<R: Runtime>(app: &AppHandle<R>) {
             .tabs
             .iter()
             .enumerate()
-            .map(|(i, t)| json!({ "label": t.label, "title": t.title, "active": i == s.active }))
+            .map(|(i, t)| json!({ "label": t.label, "title": t.title, "url": t.url, "loading": t.loading, "active": i == s.active }))
             .collect();
         json!({
             "tabs": tabs,
             "zoom": (ZOOM_STEPS[s.zoom_idx.min(ZOOM_STEPS.len()-1)] * 100.0).round() as u32,
             "version": app.package_info().version.to_string(),
+            // En macOS la barra ocupa la fila del título (ventana con título en overlay) y
+            // debe dejar libre el hueco del semáforo; en Windows hay título nativo aparte.
+            "mac": cfg!(target_os = "macos"),
         })
     };
     let _ = app.emit_to(EventTarget::webview(CHROME), "ls-tabs", payload);
+}
+
+// Marca una pestaña como «cargando» y refresca la barra (giro en el icono).
+fn set_loading<R: Runtime>(app: &AppHandle<R>, label: &str, loading: bool) {
+    {
+        let shell = app.state::<ShellState>();
+        let mut s = shell.lock().unwrap();
+        let Some(t) = s.tabs.iter_mut().find(|t| t.label == label) else { return };
+        if t.loading == loading {
+            return; // sin cambios: no repintar la barra
+        }
+        t.loading = loading;
+    }
+    broadcast(app);
 }
 
 // Muestra la pestaña `label` y esconde las demás. Devuelve el foco al contenido.
@@ -378,7 +376,7 @@ fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: boo
         let mut s = shell.lock().unwrap();
         let label = format!("tab-{}", s.next_id);
         s.next_id += 1;
-        s.tabs.push(TabRec { label: label.clone(), title: "Labstream OS".into(), url: target.clone() });
+        s.tabs.push(TabRec { label: label.clone(), title: "Labstream OS".into(), url: target.clone(), loading: true });
         label
     };
 
@@ -394,16 +392,17 @@ fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: boo
         .on_download(|_webview, _event| true)
         // El zoom guardado se re-aplica en cada carga (el factor no siempre sobrevive a la navegación).
         .on_page_load(move |wv, payload| {
-            if let PageLoadEvent::Finished = payload.event() {
+            let cargando = matches!(payload.event(), PageLoadEvent::Started);
+            if !cargando {
                 let _ = wv.set_zoom(current_zoom(&app_zoom));
             }
+            set_loading(&app_zoom, wv.label(), cargando);
         });
 
-    let top = top_offset(&win, scale);
     let created = win.add_child(
         builder,
-        LogicalPosition::new(0.0, top + TAB_BAR_H),
-        LogicalSize::new(size.width, (size.height - top - TAB_BAR_H).max(0.0)),
+        LogicalPosition::new(0.0, TAB_BAR_H),
+        LogicalSize::new(size.width, (size.height - TAB_BAR_H).max(0.0)),
     );
 
     match created {
@@ -642,6 +641,101 @@ fn show_app_menu<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+// Menú de CLIC DERECHO sobre una pestaña. Nativo (la barra mide 40 px: un menú HTML dentro
+// del webview quedaría recortado). Recuerda en el estado sobre qué pestaña se abrió.
+fn show_tab_menu<R: Runtime>(app: &AppHandle<R>, label: &str) {
+    let Some(win) = main_window(app) else { return };
+    let (idx, total) = {
+        let shell = app.state::<ShellState>();
+        let mut s = shell.lock().unwrap();
+        let Some(i) = s.tabs.iter().position(|t| t.label == label) else { return };
+        s.menu_tab = Some(label.to_string());
+        (i, s.tabs.len())
+    };
+    let build = || -> tauri::Result<Menu<R>> {
+        Ok(Menu::with_items(
+            app,
+            &[
+                &MenuItem::with_id(app, "tab-duplicate", "Duplicar pestaña", true, None::<&str>)?,
+                &MenuItem::with_id(app, "tab-copy-url", "Copiar enlace", true, None::<&str>)?,
+                &PredefinedMenuItem::separator(app)?,
+                &MenuItem::with_id(app, "tab-close", "Cerrar pestaña", true, None::<&str>)?,
+                &MenuItem::with_id(app, "tab-close-others", "Cerrar las demás", total > 1, None::<&str>)?,
+                &MenuItem::with_id(app, "tab-close-right", "Cerrar las de la derecha", idx + 1 < total, None::<&str>)?,
+            ],
+        )?)
+    };
+    if let Ok(menu) = build() {
+        let _ = win.popup_menu(&menu);
+    }
+}
+
+// Acciones del menú de pestaña. `menu_tab` guarda sobre cuál se abrió (puede no ser la activa).
+fn tab_menu_action<R: Runtime>(app: &AppHandle<R>, action: &str) {
+    let target = {
+        let shell = app.state::<ShellState>();
+        let s = shell.lock().unwrap();
+        s.menu_tab.clone()
+    };
+    let Some(label) = target else { return };
+    // Las que hay que cerrar se calculan ANTES de cerrar nada (los índices se mueven).
+    let (url, otras, derecha) = {
+        let shell = app.state::<ShellState>();
+        let s = shell.lock().unwrap();
+        let Some(i) = s.tabs.iter().position(|t| t.label == label) else { return };
+        (
+            s.tabs[i].url.clone(),
+            s.tabs.iter().filter(|t| t.label != label).map(|t| t.label.clone()).collect::<Vec<_>>(),
+            s.tabs.iter().skip(i + 1).map(|t| t.label.clone()).collect::<Vec<_>>(),
+        )
+    };
+    match action {
+        "tab-duplicate" => create_tab(app, Some(url), true),
+        "tab-copy-url" => {
+            let _ = app.clipboard().write_text(url);
+        }
+        "tab-close" => close_tab(app, &label),
+        "tab-close-others" => {
+            for l in otras {
+                close_tab(app, &l);
+            }
+        }
+        "tab-close-right" => {
+            for l in derecha {
+                close_tab(app, &l);
+            }
+        }
+        _ => {}
+    }
+}
+
+// Reordena las pestañas al soltar una en otra posición (arrastrar en la barra). Llega el
+// orden completo de etiquetas; se conserva cuál estaba activa y se guarda la sesión.
+fn reorder_tabs<R: Runtime>(app: &AppHandle<R>, order: Vec<String>) {
+    {
+        let shell = app.state::<ShellState>();
+        let mut s = shell.lock().unwrap();
+        // Solo se acepta una permutación EXACTA de las pestañas actuales (nada de perder o
+        // duplicar si la barra manda algo raro).
+        if order.len() != s.tabs.len() || !order.iter().all(|l| s.tabs.iter().any(|t| &t.label == l)) {
+            return;
+        }
+        let activa = s.tabs.get(s.active).map(|t| t.label.clone());
+        let mut nuevas: Vec<TabRec> = Vec::with_capacity(order.len());
+        for l in &order {
+            if let Some(i) = s.tabs.iter().position(|t| &t.label == l) {
+                nuevas.push(s.tabs.remove(i));
+            }
+        }
+        s.tabs = nuevas;
+        if let Some(a) = activa {
+            s.active = s.tabs.iter().position(|t| t.label == a).unwrap_or(0);
+        }
+    }
+    broadcast(app);
+    save_persisted(app);
+}
+
 // Activa/desactiva el arranque con el sistema y RECUERDA la elección (si no, el arranque
 // la re-activaba en cada apertura).
 fn toggle_autostart<R: Runtime>(app: &AppHandle<R>) {
@@ -748,6 +842,7 @@ pub fn run() {
 
     builder = builder
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None));
@@ -785,10 +880,18 @@ pub fn run() {
             }
 
             // Ventana principal (contenedora). Tamaño/posición de la sesión anterior si los hay.
+            // macOS: título en OVERLAY y sin texto → el contenido (y por tanto la barra de
+            // pestañas) ocupa también la fila del título, al estilo de Notion/VS Code. Los
+            // botones del semáforo siguen siendo los nativos; la barra les deja su hueco.
+            // En Windows se conserva el título del sistema con la barra debajo.
             let mut wb = WindowBuilder::new(app, "main")
                 .title("Labstream OS")
                 .resizable(true)
                 .min_inner_size(1024.0, 700.0);
+            #[cfg(target_os = "macos")]
+            {
+                wb = wb.title_bar_style(tauri::TitleBarStyle::Overlay).hidden_title(true);
+            }
             match saved.win {
                 Some(r) if r.w >= 600.0 && r.h >= 400.0 => {
                     wb = wb.inner_size(r.w, r.h).position(r.x, r.y);
@@ -900,6 +1003,9 @@ pub fn run() {
                         let _ = app.opener().open_url(url, None::<&str>);
                     }
                 }
+                id @ ("tab-duplicate" | "tab-copy-url" | "tab-close" | "tab-close-others" | "tab-close-right") => {
+                    tab_menu_action(app, id)
+                }
                 "autostart-toggle" => toggle_autostart(app),
                 "check-update" => {
                     #[cfg(desktop)]
@@ -916,8 +1022,12 @@ pub fn run() {
             let scale = win.scale_factor().unwrap_or(1.0);
             let size = win.inner_size()?.to_logical::<f64>(scale);
             win.add_child(
-                WebviewBuilder::new(CHROME, WebviewUrl::App("index.html".into())),
-                LogicalPosition::new(0.0, top_offset(&win, scale)),
+                WebviewBuilder::new(CHROME, WebviewUrl::App("index.html".into()))
+                    // Sin esto Tauri instala su manejador de arrastre del SISTEMA en el
+                    // webview y se traga los eventos HTML5 → no se podrían reordenar las
+                    // pestañas arrastrando. La barra no recibe archivos, así que sobra.
+                    .disable_drag_drop_handler(),
+                LogicalPosition::new(0.0, 0.0),
                 LogicalSize::new(size.width, TAB_BAR_H),
             )?;
 
@@ -1009,6 +1119,21 @@ pub fn run() {
                 set_badge(&h, n);
             });
             let h = handle.clone();
+            let h_tabmenu = handle.clone();
+            handle.listen_any("ls-tab-menu", move |e| {
+                if let Some(label) = field(e.payload(), "label") {
+                    show_tab_menu(&h_tabmenu, &label);
+                }
+            });
+            let h_reorder = handle.clone();
+            handle.listen_any("ls-reorder", move |e| {
+                // `order` llega como lista de etiquetas separadas por coma (el payload de los
+                // eventos del shell es plano: strings y números).
+                if let Some(orden) = field(e.payload(), "order") {
+                    let v: Vec<String> = orden.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+                    reorder_tabs(&h_reorder, v);
+                }
+            });
             handle.listen_any("ls-menu", move |_| {
                 show_app_menu(&h);
             });
