@@ -11,26 +11,31 @@
         emite   ls-ready, ls-new-tab, ls-activate, ls-close-tab, ls-reload, ls-zoom, ls-cycle, ls-activate-n
     -->
     <style>
+      /* Paleta estilo Chrome: la barra es una FRANJA más oscura y la pestaña activa es una
+         tarjeta del color del contenido que se funde con él (sin línea debajo). */
       :root {
-        --bg: #f4f4f5;          /* zinc-100 */
-        --fg: #3f3f46;          /* zinc-700 */
-        --muted: #a1a1aa;       /* zinc-400 */
-        --tab-bg: transparent;
+        --bg: #dee1e6;          /* franja de pestañas (Chrome claro) */
+        --fg: #45474a;
+        --muted: #5f6368;
         --tab-active-bg: #ffffff;
-        --tab-active-fg: #18181b;
+        --tab-active-fg: #202124;
         --accent: #6366f1;      /* indigo-500, color de Labstream */
-        --border: #e4e4e7;      /* zinc-200 */
-        --hover: rgba(0, 0, 0, 0.05);
+        --border: #c9ccd1;      /* línea bajo la barra (la tapa la pestaña activa) */
+        --hover: rgba(255, 255, 255, 0.55);  /* píldora de hover en pestañas inactivas */
+        --btn-hover: rgba(0, 0, 0, 0.08);
+        --sep: rgba(0, 0, 0, 0.22);          /* separador fino entre pestañas inactivas */
       }
       @media (prefers-color-scheme: dark) {
         :root {
-          --bg: #18181b;
-          --fg: #d4d4d8;
-          --muted: #71717a;
-          --tab-active-bg: #27272a;
-          --tab-active-fg: #fafafa;
-          --border: #27272a;
-          --hover: rgba(255, 255, 255, 0.07);
+          --bg: #202124;        /* franja (Chrome oscuro) */
+          --fg: #bdc1c6;
+          --muted: #80868b;
+          --tab-active-bg: #18181b;  /* mismo fondo que la app → pestaña fundida con el contenido */
+          --tab-active-fg: #e8eaed;
+          --border: #101013;
+          --hover: rgba(255, 255, 255, 0.08);
+          --btn-hover: rgba(255, 255, 255, 0.1);
+          --sep: rgba(255, 255, 255, 0.25);
         }
       }
       * { box-sizing: border-box; }
@@ -48,18 +53,22 @@
       }
       #bar {
         display: flex;
-        align-items: stretch;
-        gap: 4px;
+        align-items: center;
+        gap: 2px;
         height: 40px;
-        padding: 5px 8px 0;
+        padding: 0 6px 0 8px;
         border-bottom: 1px solid var(--border);
       }
       #tabs {
         display: flex;
-        align-items: stretch;
-        gap: 2px;
+        align-items: flex-end;
         flex: 1 1 auto;
         min-width: 0;
+        /* Se extiende 1px sobre el borde inferior de la barra para que la pestaña ACTIVA
+           lo tape con su propio fondo y quede FUNDIDA con el contenido (look Chrome). */
+        align-self: stretch;
+        margin-bottom: -1px;
+        padding: 0 4px;
         overflow-x: auto;
         scrollbar-width: none;
       }
@@ -67,28 +76,64 @@
       .tab {
         display: flex;
         align-items: center;
-        gap: 6px;
-        flex: 0 1 200px;
-        min-width: 96px;
-        padding: 0 6px 0 12px;
-        border-radius: 8px 8px 0 0;
-        background: var(--tab-bg);
+        gap: 7px;
+        flex: 0 1 220px;
+        min-width: 100px;
+        height: 30px;
+        margin-bottom: 5px;
+        padding: 0 6px 0 10px;
+        border-radius: 9px;         /* inactiva: píldora redondeada (hover) */
         position: relative;
-        overflow: hidden;
+        overflow: visible;          /* deja asomar las curvas de la base de la activa */
       }
-      .tab:hover { background: var(--hover); }
+      .tab:not(.active):hover { background: var(--hover); }
+      /* Separador fino a la IZQUIERDA de cada inactiva; se oculta pegado a la activa,
+         al hover y en la primera (igual que Chrome). */
+      .tab:not(.active)::before {
+        content: "";
+        position: absolute;
+        left: -1px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 1px;
+        height: 16px;
+        background: var(--sep);
+      }
+      .tab:first-child::before,
+      .tab:hover::before,
+      .tab.active + .tab::before,
+      .tab:hover + .tab::before { display: none; }
       .tab.active {
         background: var(--tab-active-bg);
         color: var(--tab-active-fg);
-        box-shadow: 0 -1px 0 var(--border), 1px 0 0 var(--border), -1px 0 0 var(--border);
+        height: 35px;
+        margin-bottom: 0;           /* su base cae 1px SOBRE el borde de la barra y lo tapa */
+        border-radius: 10px 10px 0 0;
+        z-index: 1;
       }
-      .tab.active::before {
+      /* Curvas cóncavas de Chrome en la base de la pestaña activa: dos piezas de 8px con
+         un cuarto de círculo transparente que "derrama" el fondo hacia los lados. */
+      .tab.active::before,
+      .tab.active::after {
         content: "";
         position: absolute;
-        top: 0; left: 0; right: 0;
-        height: 2px;
-        background: var(--accent);
-        border-radius: 2px 2px 0 0;
+        bottom: 0;
+        width: 8px;
+        height: 8px;
+      }
+      .tab.active::before {
+        left: -8px;
+        background: radial-gradient(circle at 0 0, transparent 8px, var(--tab-active-bg) 8.5px);
+      }
+      .tab.active::after {
+        right: -8px;
+        background: radial-gradient(circle at 8px 0, transparent 8px, var(--tab-active-bg) 8.5px);
+      }
+      .tab .favicon {
+        flex: 0 0 auto;
+        width: 14px;
+        height: 14px;
+        border-radius: 3px;
       }
       .tab .titulo {
         flex: 1 1 auto;
@@ -103,26 +148,26 @@
         height: 18px;
         display: grid;
         place-items: center;
-        border-radius: 5px;
+        border-radius: 50%;         /* circulito, como el × de Chrome */
         color: var(--muted);
         font-size: 13px;
         line-height: 1;
         visibility: hidden;
       }
       .tab:hover .cerrar, .tab.active .cerrar { visibility: visible; }
-      .tab .cerrar:hover { background: var(--hover); color: var(--tab-active-fg); }
+      .tab .cerrar:hover { background: var(--btn-hover); color: var(--tab-active-fg); }
       button {
         appearance: none;
         border: 0;
         background: transparent;
         color: var(--fg);
         font: inherit;
-        border-radius: 7px;
+        border-radius: 50%;
         cursor: default;
         display: grid;
         place-items: center;
       }
-      button:hover { background: var(--hover); }
+      button:hover { background: var(--btn-hover); }
       .icono {
         flex: 0 0 auto;
         width: 30px;
@@ -186,12 +231,27 @@
       const $pct = document.getElementById("z-pct");
       const $ver = document.getElementById("version");
 
+      // Favicon de las pestañas (look Chrome): mini logo Labstream en SVG inline —
+      // cuadrado indigo con la "L" — para no depender de archivos ni de la red.
+      const FAVICON = "data:image/svg+xml," + encodeURIComponent(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>" +
+        "<rect width='16' height='16' rx='4' fill='#6366f1'/>" +
+        "<path d='M5.2 3.8v7h5.6' stroke='#fff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round' fill='none'/>" +
+        "</svg>",
+      );
+
       function render() {
         $tabs.textContent = "";
         for (const t of estado.tabs) {
           const el = document.createElement("div");
           el.className = "tab" + (t.active ? " active" : "");
           el.title = t.title;
+
+          const fav = document.createElement("img");
+          fav.className = "favicon";
+          fav.src = FAVICON;
+          fav.alt = "";
+          el.appendChild(fav);
 
           const titulo = document.createElement("span");
           titulo.className = "titulo";
