@@ -1,6 +1,6 @@
 [package]
 name = "labstream-desktop"
-version = "1.4.1"
+version = "1.4.2"
 description = "Cliente de escritorio de Labstream OS"
 authors = ["Labstream SAS"]
 edition = "2021"

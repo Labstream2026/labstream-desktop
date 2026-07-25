@@ -51,6 +51,9 @@ use tauri_plugin_opener::OpenerExt;
 const SERVER_URL: &str = "https://os.labstreamsas.com";
 const TAB_BAR_H: f64 = 40.0; // alto lógico de la barra de pestañas (chrome)
 const CHROME: &str = "chrome";
+// Alto de la barra de título nativa de macOS (ventana estándar). Ver `top_offset`.
+#[cfg(target_os = "macos")]
+const MACOS_TITLEBAR_H: f64 = 28.0;
 
 // Escalones de zoom (como un navegador). 1.0 = 100%.
 const ZOOM_STEPS: &[f64] = &[0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5];
@@ -268,19 +271,40 @@ fn get_webview<R: Runtime>(app: &AppHandle<R>, label: &str) -> Option<Webview<R>
     main_window(app).and_then(|w| w.webviews().into_iter().find(|v| v.label() == label))
 }
 
+// En macOS las coordenadas de los webviews HIJOS son relativas al MARCO de la ventana
+// (incluye la barra de título) y `inner_size()` devuelve también el marco. Sin compensar,
+// la barra de pestañas se dibuja DEBAJO del título nativo y solo asoman ~12 px (además el
+// título translúcido se teñía del color de la barra). Se detecta en caliente: si el marco y
+// el interior miden lo mismo hay que compensar; si Tauri lo corrige, la resta deja de ser 0
+// y no se compensa nada. En Windows/Linux siempre es 0 (ahí las coordenadas ya son del área
+// de cliente).
+fn top_offset<R: Runtime>(win: &Window<R>, scale: f64) -> f64 {
+    #[cfg(target_os = "macos")]
+    if let (Ok(outer), Ok(inner)) = (win.outer_size(), win.inner_size()) {
+        let o = outer.to_logical::<f64>(scale).height;
+        let i = inner.to_logical::<f64>(scale).height;
+        if (o - i).abs() < 1.0 {
+            return MACOS_TITLEBAR_H;
+        }
+    }
+    let _ = (win, scale);
+    0.0
+}
+
 // Geometría: barra arriba (alto fijo), contenido debajo ocupando el resto.
 fn layout_all<R: Runtime>(app: &AppHandle<R>) {
     let Some(win) = main_window(app) else { return };
     let scale = win.scale_factor().unwrap_or(1.0);
     let Ok(size) = win.inner_size() else { return };
     let size = size.to_logical::<f64>(scale);
-    let content_h = (size.height - TAB_BAR_H).max(0.0);
+    let top = top_offset(&win, scale);
+    let content_h = (size.height - top - TAB_BAR_H).max(0.0);
     for wv in win.webviews() {
         if wv.label() == CHROME {
-            let _ = wv.set_position(LogicalPosition::new(0.0, 0.0));
+            let _ = wv.set_position(LogicalPosition::new(0.0, top));
             let _ = wv.set_size(LogicalSize::new(size.width, TAB_BAR_H));
         } else {
-            let _ = wv.set_position(LogicalPosition::new(0.0, TAB_BAR_H));
+            let _ = wv.set_position(LogicalPosition::new(0.0, top + TAB_BAR_H));
             let _ = wv.set_size(LogicalSize::new(size.width, content_h));
         }
     }
@@ -375,10 +399,11 @@ fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: boo
             }
         });
 
+    let top = top_offset(&win, scale);
     let created = win.add_child(
         builder,
-        LogicalPosition::new(0.0, TAB_BAR_H),
-        LogicalSize::new(size.width, (size.height - TAB_BAR_H).max(0.0)),
+        LogicalPosition::new(0.0, top + TAB_BAR_H),
+        LogicalSize::new(size.width, (size.height - top - TAB_BAR_H).max(0.0)),
     );
 
     match created {
@@ -892,7 +917,7 @@ pub fn run() {
             let size = win.inner_size()?.to_logical::<f64>(scale);
             win.add_child(
                 WebviewBuilder::new(CHROME, WebviewUrl::App("index.html".into())),
-                LogicalPosition::new(0.0, 0.0),
+                LogicalPosition::new(0.0, top_offset(&win, scale)),
                 LogicalSize::new(size.width, TAB_BAR_H),
             )?;
 
