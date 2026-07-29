@@ -135,6 +135,32 @@
         right: -8px;
         background: radial-gradient(circle at 8px 0, transparent 8px, var(--tab-active-bg) 8.5px);
       }
+      /* ── Color de pestaña ────────────────────────────────────────────────────────────
+         Misma idea que los grupos de Chrome: teñir para agrupar de un vistazo («todo lo de
+         este cliente, en verde»). El color se elige con clic derecho sobre la pestaña ▸ Color,
+         y se guarda con la sesión.
+         Va en componentes RGB sueltos (`--tc: r, g, b`) para sacar de UNA sola definición
+         tanto el tono sólido como el fondo translúcido, sin repetir nueve colores por tema.
+         La pestaña ACTIVA no se tiñe entera: tiene que seguir fundida con el contenido, así
+         que lleva el color en una franja superior — igual que Chrome. */
+      .tab[data-color="gris"]     { --tc: 95, 99, 104; }
+      .tab[data-color="azul"]     { --tc: 26, 115, 232; }
+      .tab[data-color="rojo"]     { --tc: 217, 48, 37; }
+      .tab[data-color="amarillo"] { --tc: 249, 171, 0; }
+      .tab[data-color="verde"]    { --tc: 30, 142, 62; }
+      .tab[data-color="rosa"]     { --tc: 208, 24, 132; }
+      .tab[data-color="morado"]   { --tc: 147, 52, 230; }
+      .tab[data-color="cian"]     { --tc: 0, 123, 131; }
+      .tab[data-color="naranja"]  { --tc: 250, 144, 62; }
+      .tab[data-color]:not(.active) { background: rgba(var(--tc), 0.18); }
+      .tab[data-color]:not(.active):hover { background: rgba(var(--tc), 0.32); }
+      /* Con fondo propio el separador vertical sobra: ya se ve dónde acaba cada pestaña. */
+      .tab[data-color]:not(.active)::before { display: none; }
+      .tab[data-color].active { box-shadow: inset 0 3px 0 rgb(var(--tc)); }
+      @media (prefers-color-scheme: dark) {
+        .tab[data-color]:not(.active) { background: rgba(var(--tc), 0.36); }
+        .tab[data-color]:not(.active):hover { background: rgba(var(--tc), 0.5); }
+      }
       /* Reordenar arrastrando: NO se usa drag&drop de HTML5 (en el webview de la barra en
          macOS los eventos no llegan), sino eventos de puntero. Se apaga el arrastre nativo de
          WebKit para que no salga la imagen fantasma al mover una pestaña. */
@@ -417,6 +443,7 @@
           const el = document.createElement("div");
           el.className = "tab" + (t.active ? " active" : "");
           el.dataset.label = t.label;
+          if (t.color) el.dataset.color = t.color; // teñido desde el menú de la pestaña
           el.title = texto;
 
           const fav = document.createElement("span");

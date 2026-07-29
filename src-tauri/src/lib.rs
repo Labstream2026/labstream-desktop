@@ -66,7 +66,24 @@ struct TabRec {
     title: String,
     url: String,
     loading: bool, // la barra pinta un giro en el icono mientras carga
+    // Color elegido a mano desde el menú de la pestaña (None = sin teñir). Aquí solo vive el
+    // NOMBRE; el tono exacto y cómo se pinta son cosa del CSS de la barra.
+    color: Option<String>,
 }
+
+// Paleta de colores de pestaña, la misma idea que los grupos de Chrome: sirve para agrupar de
+// un vistazo («todo lo de este cliente en verde»). El id viaja en el payload de `ls-tabs`.
+const TAB_COLORS: &[(&str, &str)] = &[
+    ("gris", "Gris"),
+    ("azul", "Azul"),
+    ("rojo", "Rojo"),
+    ("amarillo", "Amarillo"),
+    ("verde", "Verde"),
+    ("rosa", "Rosa"),
+    ("morado", "Morado"),
+    ("cian", "Cian"),
+    ("naranja", "Naranja"),
+];
 
 struct Shell {
     tabs: Vec<TabRec>,
@@ -107,6 +124,10 @@ struct Persisted {
     win: Option<WinRect>,
     #[serde(default)]
     tabs: Vec<String>,
+    // Color de cada pestaña, en el mismo orden que `tabs` ("" = sin teñir). Lista aparte para
+    // que un estado.json viejo (sin colores) siga cargando tal cual.
+    #[serde(default)]
+    colors: Vec<String>,
     #[serde(default)]
     active: usize,
     #[serde(default)]
@@ -133,6 +154,7 @@ fn save_persisted<R: Runtime>(app: &AppHandle<R>) {
             zoom_idx: Some(s.zoom_idx),
             win: s.win,
             tabs: s.tabs.iter().map(|t| t.url.clone()).collect(),
+            colors: s.tabs.iter().map(|t| t.color.clone().unwrap_or_default()).collect(),
             active: s.active,
             autostart: s.autostart,
         }
@@ -333,7 +355,7 @@ fn broadcast<R: Runtime>(app: &AppHandle<R>) {
             .tabs
             .iter()
             .enumerate()
-            .map(|(i, t)| json!({ "label": t.label, "title": t.title, "url": t.url, "loading": t.loading, "active": i == s.active }))
+            .map(|(i, t)| json!({ "label": t.label, "title": t.title, "url": t.url, "loading": t.loading, "active": i == s.active, "color": t.color }))
             .collect();
         json!({
             "tabs": tabs,
@@ -407,7 +429,7 @@ fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: boo
         let mut s = shell.lock().unwrap();
         let label = format!("tab-{}", s.next_id);
         s.next_id += 1;
-        s.tabs.push(TabRec { label: label.clone(), title: "Labstream OS".into(), url: target.clone(), loading: true });
+        s.tabs.push(TabRec { label: label.clone(), title: "Labstream OS".into(), url: target.clone(), loading: true, color: None });
         label
     };
 
@@ -707,19 +729,34 @@ fn show_app_menu<R: Runtime>(app: &AppHandle<R>) {
 // del webview quedaría recortado). Recuerda en el estado sobre qué pestaña se abrió.
 fn show_tab_menu<R: Runtime>(app: &AppHandle<R>, label: &str) {
     let Some(win) = main_window(app) else { return };
-    let (idx, total) = {
+    let (idx, total, actual) = {
         let shell = app.state::<ShellState>();
         let mut s = shell.lock().unwrap();
         let Some(i) = s.tabs.iter().position(|t| t.label == label) else { return };
         s.menu_tab = Some(label.to_string());
-        (i, s.tabs.len())
+        let actual = s.tabs[i].color.clone();
+        (i, s.tabs.len(), actual)
     };
+    // Los ids se arman fuera del builder para poder pasarlos como &str (igual que el resto
+    // del menú) en vez de mezclar String y &str en el mismo constructor.
+    let ids: Vec<String> = TAB_COLORS.iter().map(|(id, _)| format!("tab-color-{id}")).collect();
     let build = || -> tauri::Result<Menu<R>> {
+        // Submenú de color, con marca en el que tiene puesto ahora.
+        let mut colores: Vec<CheckMenuItem<R>> = Vec::with_capacity(TAB_COLORS.len() + 1);
+        colores.push(CheckMenuItem::with_id(app, "tab-color-ninguno", "Sin color", true, actual.is_none(), None::<&str>)?);
+        for ((cid, nombre), id) in TAB_COLORS.iter().zip(ids.iter()) {
+            let marcado = actual.as_deref() == Some(*cid);
+            colores.push(CheckMenuItem::with_id(app, id.as_str(), *nombre, true, marcado, None::<&str>)?);
+        }
+        let refs: Vec<&dyn tauri::menu::IsMenuItem<R>> = colores.iter().map(|c| c as &dyn tauri::menu::IsMenuItem<R>).collect();
+        let submenu = Submenu::with_items(app, "Color", true, &refs)?;
         Ok(Menu::with_items(
             app,
             &[
                 &MenuItem::with_id(app, "tab-duplicate", "Duplicar pestaña", true, None::<&str>)?,
                 &MenuItem::with_id(app, "tab-copy-url", "Copiar enlace", true, None::<&str>)?,
+                &PredefinedMenuItem::separator(app)?,
+                &submenu,
                 &PredefinedMenuItem::separator(app)?,
                 &MenuItem::with_id(app, "tab-close", "Cerrar pestaña", true, None::<&str>)?,
                 &MenuItem::with_id(app, "tab-close-others", "Cerrar las demás", total > 1, None::<&str>)?,
@@ -766,6 +803,24 @@ fn tab_menu_action<R: Runtime>(app: &AppHandle<R>, action: &str) {
             for l in derecha {
                 close_tab(app, &l);
             }
+        }
+        // Teñir la pestaña (o quitarle el color). Se valida contra la paleta: un id que no
+        // esté en TAB_COLORS deja la pestaña sin color en vez de guardar cualquier cosa.
+        a if a.starts_with("tab-color-") => {
+            let elegido = &a["tab-color-".len()..];
+            let nuevo = TAB_COLORS
+                .iter()
+                .find(|(id, _)| *id == elegido)
+                .map(|(id, _)| (*id).to_string());
+            {
+                let shell = app.state::<ShellState>();
+                let mut s = shell.lock().unwrap();
+                if let Some(t) = s.tabs.iter_mut().find(|t| t.label == label) {
+                    t.color = nuevo;
+                }
+            }
+            broadcast(app);
+            save_persisted(app);
         }
         _ => {}
     }
@@ -1076,6 +1131,7 @@ pub fn run() {
                 id @ ("tab-duplicate" | "tab-copy-url" | "tab-close" | "tab-close-others" | "tab-close-right") => {
                     tab_menu_action(app, id)
                 }
+                id if id.starts_with("tab-color-") => tab_menu_action(app, id),
                 "autostart-toggle" => toggle_autostart(app),
                 "check-update" => {
                     #[cfg(desktop)]
@@ -1101,22 +1157,35 @@ pub fn run() {
                 LogicalSize::new(size.width, TAB_BAR_H),
             )?;
 
-            // Pestañas de la sesión anterior (o una nueva si no hay).
-            let restore: Vec<String> = {
+            // Pestañas de la sesión anterior (o una nueva si no hay), cada una con su color.
+            // El color se empareja con su URL ANTES de filtrar: el filtro por origen puede
+            // descartar entradas y entonces los índices de las dos listas dejarían de casar.
+            let restore: Vec<(String, String)> = {
                 let server = Url::parse(SERVER_URL).expect("URL del servidor válida");
                 saved
                     .tabs
                     .iter()
-                    .filter(|u| Url::parse(u).map(|p| p.origin() == server.origin()).unwrap_or(false))
+                    .enumerate()
+                    .filter(|(_, u)| Url::parse(u).map(|p| p.origin() == server.origin()).unwrap_or(false))
                     .take(12)
-                    .cloned()
+                    .map(|(i, u)| (u.clone(), saved.colors.get(i).cloned().unwrap_or_default()))
                     .collect()
             };
             if restore.is_empty() {
                 create_tab(&handle, None, true);
             } else {
-                for url in &restore {
+                for (url, color) in &restore {
                     create_tab(&handle, Some(url.clone()), false);
+                    if !color.is_empty() {
+                        // create_tab acaba de empujar su pestaña al final de la lista.
+                        let shell = handle.state::<ShellState>();
+                        let mut s = shell.lock().unwrap();
+                        if let Some(t) = s.tabs.last_mut() {
+                            if t.url == *url {
+                                t.color = Some(color.clone());
+                            }
+                        }
+                    }
                 }
                 let idx = saved.active.min(restore.len() - 1);
                 let label = {
