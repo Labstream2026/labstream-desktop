@@ -1,6 +1,6 @@
 [package]
 name = "labstream-desktop"
-version = "1.5.0"
+version = "1.5.1"
 description = "Cliente de escritorio de Labstream OS"
 authors = ["Labstream SAS"]
 edition = "2021"
@@ -15,7 +15,11 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 # `unstable` habilita multiwebview: varios webviews (pestañas) dentro de UNA ventana.
-tauri = { version = "2", features = ["tray-icon", "unstable"] }
+# `devtools` deja el inspector disponible TAMBIÉN en release (por defecto solo va en debug:
+# wry-0.55.1/src/lib.rs:834-837). Sin él, un fallo que solo aparece en la app instalada —como
+# el de OnlyOffice en Windows— no se puede mirar por dentro y hay que deducirlo leyendo
+# fuentes. Con él, clic derecho → Inspeccionar sobre el marco que falle y se acabó.
+tauri = { version = "2", features = ["tray-icon", "unstable", "devtools"] }
 tauri-plugin-opener = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-notification = "2"

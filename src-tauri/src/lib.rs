@@ -39,7 +39,7 @@ use serde_json::json;
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    webview::{PageLoadEvent, Webview, WebviewBuilder},
+    webview::{DownloadEvent, PageLoadEvent, Webview, WebviewBuilder},
     window::{Window, WindowBuilder},
     AppHandle, Emitter, EventTarget, Listener, LogicalPosition, LogicalSize, Manager, Runtime,
     Url, WebviewUrl, WindowEvent,
@@ -148,16 +148,33 @@ fn save_persisted<R: Runtime>(app: &AppHandle<R>) {
 // - Reporta título/URL a la barra (observer del <title> + pushState del SPA).
 // - Atajos de teclado (en macOS los consume antes el menú nativo; esto cubre Windows y extras)
 //   y Ctrl+rueda para zoom.
-// En páginas de OTRO origen (p. ej. el login de Authentik) __TAURI__ no está inyectado y el
-// script sale al principio sin tocar nada — la navegación del SSO sigue intacta.
+// SOLO debe gobernar el documento principal de NUESTRO origen; ver la guarda de abajo.
 const INIT_JS_TPL: &str = r#"
 (function () {
+  var ORIGIN = "__ORIGIN__";
+
+  // ── GUARDA DE MARCO Y ORIGEN ──
+  // Antes aquí solo estaba `if (!T || !T.event) return;`, confiando en que __TAURI__ no
+  // existiría fuera del origen permitido. Eso es cierto en macOS y FALSO en Windows:
+  //   · wry inyecta los scripts de inicio en TODOS los marcos e IGNORA for_main_frame_only
+  //     (wry-0.55.1/src/webview2/mod.rs:492-495, documentado en su lib.rs:990), mientras que
+  //     WKWebView sí la respeta (wry-0.55.1/src/wkwebview/mod.rs:643-645);
+  //   · y __TAURI__ viaja con ellos (withGlobalTauri, tauri/src/manager/webview.rs:159-165).
+  // Consecuencia real: dentro del iframe del editor de OnlyOffice (docs.labstreamsas.com)
+  // este script SÍ corría en Windows, con ORIGIN apuntando todavía a la app. Como allí
+  // `location.href` es el del Document Server, abs() resolvía CADA enlace del editor contra
+  // docs.* → isExt() cierto → preventDefault() + mandarlo al navegador del sistema (que no
+  // tiene la sesión: «no se puede acceder»), y window.open devolvía null. Por eso editar y
+  // descargar fallaban solo en la app de Windows, y no en Mac ni en el navegador.
+  // En macOS estas dos líneas son un no-op: allí el script nunca ha corrido en subframes.
+  try { if (window.top !== window.self) return; } catch (e) { return; }
+  if (location.origin !== ORIGIN) return; // p. ej. el login del SSO: no intervenir
+
   if (window.__lsShell) return;
   window.__lsShell = true;
   var T = window.__TAURI__;
-  if (!T || !T.event) return; // página fuera del origen permitido (p. ej. SSO): no intervenir
+  if (!T || !T.event) return;
   var LABEL = "__LABEL__";
-  var ORIGIN = "__ORIGIN__";
 
   function abs(h) { try { return new URL(h, location.href); } catch (e) { return null; } }
   function isHttp(u) { return !!u && (u.protocol === 'http:' || u.protocol === 'https:'); }
@@ -224,6 +241,11 @@ const INIT_JS_TPL: &str = r#"
 
   // Atajos de teclado.
   addEventListener('keydown', function (e) {
+    // AltGr enciende ctrlKey en Windows. Sin este filtro, escribir [ o ] con teclado
+    // español —que se hacen con AltGr— entraba por aquí y disparaba history.back() /
+    // history.forward() en vez de escribir el carácter: en el editor, en el chat, en una
+    // nota y en cualquier campo de la app. En macOS no aplica (Option no toca ctrlKey).
+    if (e.altKey) return;
     var mod = e.metaKey || e.ctrlKey;
     if (!mod) return;
     var k = e.key;
@@ -388,8 +410,39 @@ fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: boo
     let app_zoom = app.clone();
     let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed))
         .initialization_script(&init)
-        // Deja pasar las descargas (entregables, exportaciones) con el diálogo nativo de guardado.
-        .on_download(|_webview, _event| true)
+        // Deja pasar las descargas (entregables, exportaciones) Y avisa al terminar.
+        // El aviso no es un adorno: en WebView2 la interfaz de descargas queda SIEMPRE
+        // apagada. wry trae un manejador de descargas por defecto (wry-0.55.1/src/lib.rs:830),
+        // asi que DownloadStarting se registra siempre y siempre responde SetHandled(true)
+        // (wry-0.55.1/src/webview2/mod.rs:858-861), lo que le dice a WebView2 que del aviso
+        // se encarga la app: ni barra de progreso, ni globo de «descarga terminada». El
+        // archivo bajaba bien a la carpeta de Descargas, pero NADA lo decia y parecia roto.
+        // Quitar este manejador NO devuelve la interfaz nativa: el de wry sigue puesto.
+        .on_download(|webview, event| {
+            if let DownloadEvent::Finished { path, success, .. } = &event {
+                let cuerpo = if !*success {
+                    "No se pudo completar la descarga.".to_string()
+                } else if let Some(p) = path {
+                    // En macOS `path` llega siempre vacio (limite de WKDownload:
+                    // wry-0.55.1/src/wkwebview/download.rs:98), asi que en la practica
+                    // este brazo con nombre de archivo es el de Windows.
+                    match p.file_name() {
+                        Some(n) => format!("Descargado: {}", n.to_string_lossy()),
+                        None => "Descarga terminada.".to_string(),
+                    }
+                } else {
+                    "Descarga terminada. Esta en tu carpeta de Descargas.".to_string()
+                };
+                let _ = webview
+                    .app_handle()
+                    .notification()
+                    .builder()
+                    .title("Labstream OS")
+                    .body(cuerpo)
+                    .show();
+            }
+            true
+        })
         // El zoom guardado se re-aplica en cada carga (el factor no siempre sobrevive a la navegación).
         .on_page_load(move |wv, payload| {
             let cargando = matches!(payload.event(), PageLoadEvent::Started);
