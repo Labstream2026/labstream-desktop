@@ -77,11 +77,14 @@ struct Shell {
     autostart: Option<bool>, // elección del usuario en el menú ⋮ (None = por defecto, activado)
     closed: Vec<String>,     // URLs de pestañas cerradas (para «Reabrir pestaña cerrada», ⌘⇧T)
     menu_tab: Option<String>, // pestaña sobre la que se abrió el menú de clic derecho
+    // Último estado maximizado conocido. Solo sirve para no repintar la barra en CADA
+    // evento de redimensión: únicamente cuando el icono ▢/❐ tiene que cambiar.
+    maximized: bool,
 }
 
 impl Default for Shell {
     fn default() -> Self {
-        Self { tabs: Vec::new(), active: 0, zoom_idx: ZOOM_100, next_id: 1, win: None, autostart: None, closed: Vec::new(), menu_tab: None }
+        Self { tabs: Vec::new(), active: 0, zoom_idx: ZOOM_100, next_id: 1, win: None, autostart: None, closed: Vec::new(), menu_tab: None, maximized: false }
     }
 }
 
@@ -321,6 +324,8 @@ fn current_zoom<R: Runtime>(app: &AppHandle<R>) -> f64 {
 
 // Manda el estado de pestañas + zoom + versión a la barra (webview "chrome").
 fn broadcast<R: Runtime>(app: &AppHandle<R>) {
+    // Se consulta ANTES de tomar el lock del shell: así no se anidan dos cerrojos.
+    let maximized = main_window(app).and_then(|w| w.is_maximized().ok()).unwrap_or(false);
     let payload = {
         let shell = app.state::<ShellState>();
         let s = shell.lock().unwrap();
@@ -335,8 +340,12 @@ fn broadcast<R: Runtime>(app: &AppHandle<R>) {
             "zoom": (ZOOM_STEPS[s.zoom_idx.min(ZOOM_STEPS.len()-1)] * 100.0).round() as u32,
             "version": app.package_info().version.to_string(),
             // En macOS la barra ocupa la fila del título (ventana con título en overlay) y
-            // debe dejar libre el hueco del semáforo; en Windows hay título nativo aparte.
+            // debe dejar libre el hueco del semáforo, que lo pinta el sistema.
             "mac": cfg!(target_os = "macos"),
+            // En Windows la ventana va SIN decoración: la barra es la fila del título, así
+            // que dibuja ella misma los botones minimizar/maximizar/cerrar (no hay nativos).
+            "win": cfg!(target_os = "windows"),
+            "maximized": maximized,
         })
     };
     let _ = app.emit_to(EventTarget::webview(CHROME), "ls-tabs", payload);
@@ -933,10 +942,14 @@ pub fn run() {
             }
 
             // Ventana principal (contenedora). Tamaño/posición de la sesión anterior si los hay.
-            // macOS: título en OVERLAY y sin texto → el contenido (y por tanto la barra de
-            // pestañas) ocupa también la fila del título, al estilo de Notion/VS Code. Los
-            // botones del semáforo siguen siendo los nativos; la barra les deja su hueco.
-            // En Windows se conserva el título del sistema con la barra debajo.
+            // En AMBOS sistemas la barra de pestañas ocupa la fila del título, como Chrome:
+            // no se desperdicia una franja entera en repetir el nombre de la app.
+            // - macOS: título en OVERLAY y sin texto; el semáforo lo sigue pintando el sistema
+            //   encima y la barra le deja su hueco (clase `mac` del CSS).
+            // - Windows: ventana SIN decoración; los botones minimizar/maximizar/cerrar los
+            //   dibuja la propia barra (clase `win`) y actúan por el evento `ls-window`.
+            //   `resizable(true)` conserva WS_THICKFRAME, así que los bordes siguen
+            //   redimensionando y Aero Snap (arrastrar a un borde, Win+flechas) sigue vivo.
             let mut wb = WindowBuilder::new(app, "main")
                 .title("Labstream OS")
                 .resizable(true)
@@ -944,6 +957,10 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             {
                 wb = wb.title_bar_style(tauri::TitleBarStyle::Overlay).hidden_title(true);
+            }
+            #[cfg(target_os = "windows")]
+            {
+                wb = wb.decorations(false);
             }
             match saved.win {
                 Some(r) if r.w >= 600.0 && r.h >= 400.0 => {
@@ -1190,6 +1207,30 @@ pub fn run() {
             handle.listen_any("ls-menu", move |_| {
                 show_app_menu(&h);
             });
+            // Botones de ventana de la barra. Solo se pintan en Windows, donde la ventana va
+            // sin decoración y no hay aspa del sistema. «close» pasa por CloseRequested, así
+            // que hace lo mismo de siempre: ocultar a la bandeja, no salir de la app.
+            let h = handle.clone();
+            handle.listen_any("ls-window", move |e| {
+                let Some(win) = main_window(&h) else { return };
+                match field(e.payload(), "act").as_deref() {
+                    Some("min") => {
+                        let _ = win.minimize();
+                    }
+                    Some("max") => {
+                        // El repintado del icono ▢/❐ lo dispara el Resized que viene después.
+                        if win.is_maximized().unwrap_or(false) {
+                            let _ = win.unmaximize();
+                        } else {
+                            let _ = win.maximize();
+                        }
+                    }
+                    Some("close") => {
+                        let _ = win.close();
+                    }
+                    _ => {}
+                }
+            });
             // Clic en la etiqueta de versión de la barra → buscar actualización (con aviso).
             let h = handle.clone();
             handle.listen_any("ls-check-update", move |_| {
@@ -1265,17 +1306,39 @@ pub fn run() {
                 WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                     let app = window.app_handle();
                     layout_all(app);
-                    if let (Ok(pos), Ok(size)) = (window.outer_position(), window.inner_size()) {
-                        let scale = window.scale_factor().unwrap_or(1.0);
-                        let p = pos.to_logical::<f64>(scale);
-                        let s = size.to_logical::<f64>(scale);
+                    // Maximizar/restaurar llega como un Resized más: si el estado cambió, la
+                    // barra tiene que repintar su icono ▢/❐. Se compara antes de emitir para
+                    // no repintarla en cada píxel mientras se arrastra un borde.
+                    let maxi = window.is_maximized().unwrap_or(false);
+                    let cambio = {
                         let shell = app.state::<ShellState>();
-                        shell.lock().unwrap().win =
-                            Some(WinRect { x: p.x, y: p.y, w: s.width, h: s.height });
+                        let mut s = shell.lock().unwrap();
+                        let antes = s.maximized;
+                        s.maximized = maxi;
+                        antes != maxi
+                    };
+                    if cambio {
+                        broadcast(app);
+                    }
+                    // La geometría MAXIMIZADA no se guarda: al reabrir volvería como ventana
+                    // normal del tamaño de la pantalla y, sin decoración, taparía la barra de
+                    // tareas. Se conserva la última geometría restaurada.
+                    if !maxi {
+                        if let (Ok(pos), Ok(size)) = (window.outer_position(), window.inner_size()) {
+                            let scale = window.scale_factor().unwrap_or(1.0);
+                            let p = pos.to_logical::<f64>(scale);
+                            let s = size.to_logical::<f64>(scale);
+                            let shell = app.state::<ShellState>();
+                            shell.lock().unwrap().win =
+                                Some(WinRect { x: p.x, y: p.y, w: s.width, h: s.height });
+                        }
                     }
                 }
                 WindowEvent::Moved(_) => {
                     let app = window.app_handle();
+                    if window.is_maximized().unwrap_or(false) {
+                        return; // ver arriba: maximizada no se guarda
+                    }
                     if let (Ok(pos), Ok(size)) = (window.outer_position(), window.inner_size()) {
                         let scale = window.scale_factor().unwrap_or(1.0);
                         let p = pos.to_logical::<f64>(scale);

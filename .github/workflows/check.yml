@@ -1,0 +1,59 @@
+name: Verificar compilación (sin publicar)
+
+# Comprueba que el shell COMPILA en Windows y macOS sin construir instaladores ni tocar
+# Releases. Sirve para revisar un cambio en una rama antes de etiquetar la versión: el
+# workflow de publicar solo se dispara con etiquetas `v*`, así que hasta ahora no había
+# forma de saber si algo compilaba sin publicarlo.
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read # solo lee el repo: no crea releases ni sube nada
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest, macos-latest]
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Clonar repo
+        uses: actions/checkout@v4
+
+      - name: Instalar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalar Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache de Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Instalar dependencias
+        run: npm install
+
+      # build.rs de Tauri valida que existan los iconos que declara tauri.conf.json.
+      - name: Generar iconos (desde app-icon.png)
+        run: npm run icons
+
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check --all-targets
+
+      # Avisa de errores reales de Clippy sin tumbar la verificación por avisos de estilo.
+      - name: cargo clippy (informativo)
+        working-directory: src-tauri
+        continue-on-error: true
+        run: cargo clippy --all-targets

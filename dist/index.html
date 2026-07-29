@@ -233,6 +233,31 @@
         border-radius: 13px;
       }
       #version:hover { color: var(--accent); }
+      /* ── Botones de ventana ──────────────────────────────────────────────────────────
+         Solo en Windows: allí la ventana va SIN decoración, así que esta barra es la fila
+         del título (como Chrome) y el aspa del sistema no existe. Medidas y colores del
+         propio Windows 11: 46 px de ancho, alto completo de la barra, esquinas rectas
+         hasta el borde, y rojo #c42b1c en el aspa al pasar por encima.
+         Los glifos salen de la fuente de iconos del sistema (Fluent en Win 11, MDL2 en 10). */
+      #wincontrols { display: none; }
+      body.win #wincontrols {
+        display: flex;
+        flex: 0 0 auto;
+        align-self: stretch;
+        margin-left: 6px;
+      }
+      /* Los botones tienen que morder el borde derecho: la barra cede su margen. */
+      body.win #bar { padding-right: 0; }
+      #wincontrols button {
+        width: 46px;
+        border-radius: 0;
+        color: var(--fg);
+        font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", system-ui;
+        font-size: 10px;
+        line-height: 1;
+      }
+      #wincontrols button:hover { background: var(--btn-hover); }
+      #w-cerrar:hover { background: #c42b1c; color: #fff; }
     </style>
   </head>
   <body>
@@ -251,6 +276,12 @@
       </div>
       <button id="version" title="Versión de la app · clic: buscar actualización"></button>
       <button class="icono" id="menu" title="Opciones de la app">⋮</button>
+      <!-- Solo visibles en Windows (clase `win` del body): allí no hay barra de título. -->
+      <div id="wincontrols">
+        <button id="w-min" title="Minimizar">&#xE921;</button>
+        <button id="w-max" title="Maximizar">&#xE922;</button>
+        <button id="w-cerrar" title="Cerrar">&#xE8BB;</button>
+      </div>
     </div>
     <script>
       const T = window.__TAURI__;
@@ -264,6 +295,7 @@
       const $tabs = document.getElementById("tabs");
       const $pct = document.getElementById("z-pct");
       const $ver = document.getElementById("version");
+      const $wmax = document.getElementById("w-max");
 
       // Nombre + icono de cada pestaña a partir de su RUTA (mismas etiquetas que la barra
       // superior de la web). Sin esto todas las pestañas se llamaban «(25) Labstream OS» y
@@ -441,6 +473,14 @@
         $ver.textContent = estado.version ? "v" + estado.version : "";
         // En macOS la barra ES la fila del título: hay que dejar libre el semáforo.
         document.body.classList.toggle("mac", !!estado.mac);
+        // En Windows también ES la fila del título, pero ahí los botones de ventana los
+        // pinta esta barra: el del medio alterna entre maximizar (▢) y restaurar (❐).
+        document.body.classList.toggle("win", !!estado.win);
+        if (estado.win) {
+          const max = !!estado.maximized;
+          $wmax.textContent = max ? "\uE923" : "\uE922"; // ChromeRestore / ChromeMaximize
+          $wmax.title = max ? "Restaurar" : "Maximizar";
+        }
       }
 
       if (E) {
@@ -466,10 +506,14 @@
       document.getElementById("z-menos").addEventListener("click", () => emitir("ls-zoom", { dir: -1 }));
       document.getElementById("z-mas").addEventListener("click", () => emitir("ls-zoom", { dir: 1 }));
       $pct.addEventListener("click", () => emitir("ls-zoom", { dir: 0 }));
-      // Doble clic en el hueco libre de la barra = pestaña nueva.
-      $tabs.addEventListener("dblclick", (e) => {
-        if (e.target === $tabs) emitir("ls-new-tab", {});
-      });
+      // Botones de ventana (Windows). Cerrar oculta a la bandeja, como el aspa de siempre.
+      document.getElementById("w-min").addEventListener("click", () => emitir("ls-window", { act: "min" }));
+      $wmax.addEventListener("click", () => emitir("ls-window", { act: "max" }));
+      document.getElementById("w-cerrar").addEventListener("click", () => emitir("ls-window", { act: "close" }));
+      // El doble clic en el hueco libre lo gobierna `data-tauri-drag-region`: maximiza y
+      // restaura, como la barra de título del sistema y como la de pestañas de Chrome.
+      // (Antes abría una pestaña nueva; ahora que la barra ES el título, chocaba con él.
+      // Para una pestaña nueva quedan el botón + y ⌘/Ctrl+T.)
 
       // Atajos también cuando el foco está en la barra.
       addEventListener("keydown", (e) => {
