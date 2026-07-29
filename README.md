@@ -12,6 +12,14 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   la app** — antes morían en silencio. También ⌘/Ctrl+clic y clic central.
   Atajos: ⌘/Ctrl+T nueva, ⌘/Ctrl+W cerrar, Ctrl+Tab rotar, ⌘/Ctrl+1…9 ir a la n.
   La sesión (pestañas abiertas, activa) **se restaura** al reabrir.
+- **La barra de pestañas ES la fila del título** (v1.6.0), en Windows y en macOS:
+  no se gasta una franja entera en repetir el nombre de la app. En Windows la
+  ventana va sin decoración y la propia barra dibuja los botones minimizar /
+  maximizar / cerrar; en macOS el semáforo lo sigue pintando el sistema y la barra
+  le deja su hueco. El doble clic en el hueco libre maximiza y restaura.
+- **Colores de pestaña** (v1.6.0): clic derecho sobre una pestaña ▸ **Color**, con
+  la misma paleta de nueve tonos que usa Chrome para sus grupos. Sirve para agrupar
+  de un vistazo (todo lo de un cliente en verde) y **se guarda con la sesión**.
 - **Zoom de interfaz**: ⌘/Ctrl `+` / `−` / `0` y Ctrl+rueda, con indicador en la
   barra y **persistencia** entre sesiones (50%–250%).
 - **Documentos dentro de la app**: los visores/editores del propio servidor
@@ -133,22 +141,29 @@ el de Mac a la vez, así ambas plataformas van siempre sincronizadas.
 
 ---
 
-## Actualización automática (opcional, recomendable a futuro)
+## Actualización automática (ACTIVA)
 
-Hoy, para actualizar, el equipo descarga el nuevo instalador del Release y lo
-reinstala encima. Para que las apps ya instaladas se actualicen solas, Tauri trae
-un *updater* (funciona igual en Windows y Mac). Para activarlo (paso futuro):
+Las apps ya instaladas **se actualizan solas**: el updater consulta el `latest.json`
+que publica cada Release, y los instaladores se firman en el CI con la clave privada
+guardada como secret del repo (`TAURI_SIGNING_PRIVATE_KEY`). También se puede forzar
+la comprobación con clic en la versión de la barra, o desde el menú ⋮ ▸ *Buscar
+actualización…*.
 
-1. Genera el par de claves de firma:
-   ```bash
-   npm run tauri signer generate -- -w ~/.tauri/labstream.key
-   ```
-2. Añade el `plugin-updater` y la clave pública en `tauri.conf.json`, y guarda la
-   clave privada como **secret** en GitHub (`TAURI_SIGNING_PRIVATE_KEY`).
-3. Apunta el updater al `latest.json` que publica el Release.
+> ⚠️ De ahí se sigue algo que conviene tener presente: **un commit en `main` no le
+> llega a nadie**. Mientras no exista la etiqueta `vX.Y.Z`, el CI no construye nada y
+> el updater no ve versión nueva. Y al revés: publicar una etiqueta **actualiza la app
+> de todo el equipo**, así que no es un paso que se dé a la ligera.
 
-Se deja sin activar a propósito para que la **primera** versión compile sin
-configuración extra.
+## Probar un cambio antes de publicarlo
+
+`.github/workflows/check.yml` corre en cualquier rama que no sea `main` y **no publica
+nada**:
+
+- `cargo check` en Windows y macOS — comprueba que compila en las dos.
+- Un job aparte deja el **instalador `.exe` de prueba** como *artifact* de la ejecución
+  (14 días), para instalarlo encima y ver el cambio funcionando de verdad.
+
+Es la forma de mirar un cambio visual —la barra, los colores— sin sacárselo al equipo.
 
 ---
 
