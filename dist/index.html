@@ -15,28 +15,35 @@
       (`data-tauri-drag-region`). En Windows hay título nativo aparte y no se reserva nada.
     -->
     <style>
-      /* Paleta estilo Chrome: la barra es una FRANJA más oscura y la pestaña activa es una
-         tarjeta del color del contenido que se funde con él (sin línea debajo). */
+      /* La barra se pinta del color de la APP, no del gris de Chrome: blanca en tema claro y
+         negra en oscuro, para que la ventana se lea como una sola pieza y no como una franja
+         de navegador pegada encima.
+         El truco de Chrome se conserva igual —la pestaña activa es una tarjeta del color del
+         CONTENIDO que se funde con él—, solo que ahora el contraste va al revés en oscuro: la
+         franja es más negra que el contenido, así que la activa destaca por ser más clara. La
+         diferencia es sutil a propósito; quien la marca de verdad es el borde inferior, que la
+         pestaña activa tapa con su propio fondo. */
       :root {
-        --bg: #dee1e6;          /* franja de pestañas (Chrome claro) */
+        --bg: #f4f5f7;          /* franja: casi blanca, del tono de la app en claro */
         --fg: #45474a;
         --muted: #5f6368;
-        --tab-active-bg: #ffffff;
+        --tab-active-bg: #ffffff;  /* mismo fondo que la app → pestaña fundida con el contenido */
         --tab-active-fg: #202124;
         --accent: #6366f1;      /* indigo-500, color de Labstream */
-        --border: #c9ccd1;      /* línea bajo la barra (la tapa la pestaña activa) */
-        --hover: rgba(255, 255, 255, 0.55);  /* píldora de hover en pestañas inactivas */
+        --border: #dcdee1;      /* línea bajo la barra (la tapa la pestaña activa) */
+        /* Sobre una franja casi blanca, un hover blanco no se vería: aquí oscurece. */
+        --hover: rgba(0, 0, 0, 0.06);
         --btn-hover: rgba(0, 0, 0, 0.08);
         --sep: rgba(0, 0, 0, 0.22);          /* separador fino entre pestañas inactivas */
       }
       @media (prefers-color-scheme: dark) {
         :root {
-          --bg: #202124;        /* franja (Chrome oscuro) */
+          --bg: #0d0d0f;        /* franja: negra, más oscura que el contenido */
           --fg: #bdc1c6;
           --muted: #80868b;
           --tab-active-bg: #18181b;  /* mismo fondo que la app → pestaña fundida con el contenido */
           --tab-active-fg: #e8eaed;
-          --border: #101013;
+          --border: #26262a;
           --hover: rgba(255, 255, 255, 0.08);
           --btn-hover: rgba(255, 255, 255, 0.1);
           --sep: rgba(255, 255, 255, 0.25);
@@ -81,10 +88,13 @@
         display: flex;
         align-items: center;
         gap: 7px;
-        /* Elástico como en Chrome: se reparten el ancho y se encogen al abrir más. */
+        /* Elástico como en Chrome: se reparten el ancho y se encogen al abrir más. El tope
+           sube a 280 px porque los títulos ahora traen nombre real y sección
+           («Hotjamin Orgánicos · Archivos»), y a 240 se cortaban de más. Con muchas pestañas
+           abiertas da igual: mandan el reparto y el modo compacto. */
         flex: 1 1 220px;
         min-width: 42px;
-        max-width: 240px;
+        max-width: 280px;
         height: 30px;
         margin-bottom: 5px;
         padding: 0 6px 0 10px;
