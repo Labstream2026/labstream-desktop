@@ -221,16 +221,39 @@ const INIT_JS_TPL: &str = r#"
   }
   function newTab(url) { emit('ls-new-tab', { url: url }); }
 
+  // ── ¿La página se VE oscura? ──
+  // Señales, de la más directa a la más física: la clase `dark` (next-themes) y, si no
+  // está, el color de fondo REALMENTE pintado (luminancia del body) — vale sea cual sea
+  // el mecanismo de tema. Devuelve null con el documento a medio crear (los scripts de
+  // inicio corren antes de que exista <html>): entonces el campo NO viaja y Rust conserva
+  // el último valor bueno. La v1.7.0 leía la clase a secas y sin red: en WebView2 eso
+  // podía reventar en frío y dejar `dark` mintiendo en estado.json (barra clara sobre
+  // app oscura — el bug al revés).
+  function temaOscuro() {
+    try {
+      var doc = document.documentElement, cuerpo = document.body;
+      if (!doc) return null;
+      if (doc.classList.contains('dark') || (cuerpo && cuerpo.classList.contains('dark'))) return true;
+      if (!cuerpo) return null;
+      var fondo = getComputedStyle(cuerpo).backgroundColor || '';
+      var m = fondo.match(/rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s\/]+([\d.]+))?/);
+      if (m && (m[4] === undefined || parseFloat(m[4]) > 0.5)) {
+        return 0.2126 * m[1] + 0.7152 * m[2] + 0.0722 * m[3] < 128;
+      }
+      var esquema = getComputedStyle(doc).colorScheme || '';
+      if (esquema.indexOf('dark') >= 0 && esquema.indexOf('light') < 0) return true;
+      return false;
+    } catch (e) { return null; }
+  }
+
   // Título, URL y TEMA → barra de pestañas (y para restaurar la sesión al reabrir).
-  // El tema viaja aquí porque la web decide su modo con su propio botón (next-themes,
-  // clase `dark` en <html>) y NO sigue al sistema: la barra tiene que copiarle a ella.
+  // El tema viaja aquí porque la web decide su modo con su propio botón y NO sigue al
+  // sistema: la barra tiene que copiarle a ELLA.
   function report() {
-    emit('ls-title', {
-      label: LABEL,
-      title: document.title || 'Labstream OS',
-      url: location.href,
-      dark: document.documentElement.classList.contains('dark')
-    });
+    var carga = { label: LABEL, title: document.title || 'Labstream OS', url: location.href };
+    var oscuro = temaOscuro();
+    if (oscuro !== null) carga.dark = oscuro;
+    emit('ls-title', carga);
   }
   function watchTitle() {
     var el = document.querySelector('title');
@@ -249,11 +272,18 @@ const INIT_JS_TPL: &str = r#"
     history[k] = function () { var r = o.apply(this, arguments); setTimeout(report, 0); return r; };
   });
   addEventListener('popstate', function () { setTimeout(report, 0); });
-  // Pulsar la luna cambia la clase de <html> sin navegar: se observa para que la barra
-  // se entere al instante.
-  if (window.MutationObserver) {
-    new MutationObserver(report).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+  // Pulsar la luna cambia clases/estilos sin navegar: se vigilan <html> y <body> (cuando
+  // existan — a document-start aún no hay), y tras la carga se re-reporta un par de veces
+  // por si el tema aterriza tarde con la hidratación.
+  function vigilarTema() {
+    if (!window.MutationObserver) return;
+    var conf = { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] };
+    if (document.documentElement) new MutationObserver(report).observe(document.documentElement, conf);
+    if (document.body) new MutationObserver(report).observe(document.body, conf);
   }
+  if (document.body) vigilarTema();
+  else document.addEventListener('DOMContentLoaded', vigilarTema);
+  addEventListener('load', function () { setTimeout(report, 800); setTimeout(report, 2500); });
 
   // Clics en enlaces.
   document.addEventListener('click', function (e) {
