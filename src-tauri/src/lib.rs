@@ -97,11 +97,15 @@ struct Shell {
     // Último estado maximizado conocido. Solo sirve para no repintar la barra en CADA
     // evento de redimensión: únicamente cuando el icono ▢/❐ tiene que cambiar.
     maximized: bool,
+    // Tema REAL de la app (la clase `dark` de <html>, reportada por el script inyectado).
+    // Es global y no por pestaña: todas las pestañas del origen comparten el mismo modo
+    // (localStorage). None = ninguna pestaña ha reportado aún → la barra cae al del sistema.
+    dark: Option<bool>,
 }
 
 impl Default for Shell {
     fn default() -> Self {
-        Self { tabs: Vec::new(), active: 0, zoom_idx: ZOOM_100, next_id: 1, win: None, autostart: None, closed: Vec::new(), menu_tab: None, maximized: false }
+        Self { tabs: Vec::new(), active: 0, zoom_idx: ZOOM_100, next_id: 1, win: None, autostart: None, closed: Vec::new(), menu_tab: None, maximized: false, dark: None }
     }
 }
 
@@ -132,6 +136,10 @@ struct Persisted {
     active: usize,
     #[serde(default)]
     autostart: Option<bool>,
+    // Último tema conocido de la app: la barra abre ya del color correcto en vez de
+    // arrancar con el del sistema y dar un fogonazo al cargar la primera pestaña.
+    #[serde(default)]
+    dark: Option<bool>,
 }
 
 fn state_path<R: Runtime>(app: &AppHandle<R>) -> Option<std::path::PathBuf> {
@@ -157,6 +165,7 @@ fn save_persisted<R: Runtime>(app: &AppHandle<R>) {
             colors: s.tabs.iter().map(|t| t.color.clone().unwrap_or_default()).collect(),
             active: s.active,
             autostart: s.autostart,
+            dark: s.dark,
         }
     };
     if let Some(dir) = path.parent() {
@@ -212,9 +221,16 @@ const INIT_JS_TPL: &str = r#"
   }
   function newTab(url) { emit('ls-new-tab', { url: url }); }
 
-  // Título y URL → barra de pestañas (y para restaurar la sesión al reabrir).
+  // Título, URL y TEMA → barra de pestañas (y para restaurar la sesión al reabrir).
+  // El tema viaja aquí porque la web decide su modo con su propio botón (next-themes,
+  // clase `dark` en <html>) y NO sigue al sistema: la barra tiene que copiarle a ella.
   function report() {
-    emit('ls-title', { label: LABEL, title: document.title || 'Labstream OS', url: location.href });
+    emit('ls-title', {
+      label: LABEL,
+      title: document.title || 'Labstream OS',
+      url: location.href,
+      dark: document.documentElement.classList.contains('dark')
+    });
   }
   function watchTitle() {
     var el = document.querySelector('title');
@@ -233,6 +249,11 @@ const INIT_JS_TPL: &str = r#"
     history[k] = function () { var r = o.apply(this, arguments); setTimeout(report, 0); return r; };
   });
   addEventListener('popstate', function () { setTimeout(report, 0); });
+  // Pulsar la luna cambia la clase de <html> sin navegar: se observa para que la barra
+  // se entere al instante.
+  if (window.MutationObserver) {
+    new MutationObserver(report).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+  }
 
   // Clics en enlaces.
   document.addEventListener('click', function (e) {
@@ -368,6 +389,8 @@ fn broadcast<R: Runtime>(app: &AppHandle<R>) {
             // que dibuja ella misma los botones minimizar/maximizar/cerrar (no hay nativos).
             "win": cfg!(target_os = "windows"),
             "maximized": maximized,
+            // Tema real de la app (null hasta el primer reporte: la barra usa el del sistema).
+            "dark": s.dark,
         })
     };
     let _ = app.emit_to(EventTarget::webview(CHROME), "ls-tabs", payload);
@@ -945,6 +968,10 @@ fn field_i64(payload: &str, key: &str) -> Option<i64> {
     serde_json::from_str::<serde_json::Value>(payload).ok()?.get(key)?.as_i64()
 }
 
+fn field_bool(payload: &str, key: &str) -> Option<bool> {
+    serde_json::from_str::<serde_json::Value>(payload).ok()?.get(key)?.as_bool()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default();
@@ -994,6 +1021,7 @@ pub fn run() {
                 s.zoom_idx = saved.zoom_idx.unwrap_or(ZOOM_100).min(ZOOM_STEPS.len() - 1);
                 s.win = saved.win;
                 s.autostart = saved.autostart;
+                s.dark = saved.dark;
             }
 
             // Ventana principal (contenedora). Tamaño/posición de la sesión anterior si los hay.
@@ -1308,10 +1336,11 @@ pub fn run() {
             });
             let h = handle.clone();
             handle.listen_any("ls-title", move |e| {
-                let (label, title, url) = (
+                let (label, title, url, dark) = (
                     field(e.payload(), "label"),
                     field(e.payload(), "title"),
                     field(e.payload(), "url"),
+                    field_bool(e.payload(), "dark"),
                 );
                 if let Some(label) = label {
                     let shell = h.state::<ShellState>();
@@ -1323,6 +1352,11 @@ pub fn run() {
                         if let Some(url) = url {
                             t.url = url;
                         }
+                    }
+                    // El tema es global (todas las pestañas del origen comparten modo): el
+                    // último reporte manda, venga de la pestaña que venga.
+                    if let Some(dark) = dark {
+                        s.dark = Some(dark);
                     }
                     drop(s);
                     broadcast(&h);

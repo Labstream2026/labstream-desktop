@@ -7,7 +7,8 @@
     <!--
       Barra de pestañas del shell de escritorio (webview "chrome", local).
       Habla con Rust por eventos (__TAURI__.event):
-        recibe  ls-tabs      {tabs:[{label,title,url,loading,active}], zoom, version, mac}
+        recibe  ls-tabs      {tabs:[{label,title,url,loading,active,color}], zoom, version,
+                              mac, win, maximized, dark}
         emite   ls-ready, ls-new-tab, ls-activate, ls-close-tab, ls-reload, ls-zoom, ls-cycle,
                 ls-activate-n, ls-nav, ls-menu, ls-check-update, ls-tab-menu, ls-reorder
       En macOS la ventana lleva el título en OVERLAY: esta barra ES la fila del título, así que
@@ -29,15 +30,24 @@
         --muted: #5f6368;
         --tab-active-bg: #ffffff;  /* mismo fondo que la app → pestaña fundida con el contenido */
         --tab-active-fg: #202124;
-        --accent: #6366f1;      /* indigo-500, color de Labstream */
+        --accent: #F47A20;      /* NARANJA Labstream (el índigo de antes no era de la marca) */
         --border: #dcdee1;      /* línea bajo la barra (la tapa la pestaña activa) */
         /* Sobre una franja casi blanca, un hover blanco no se vería: aquí oscurece. */
         --hover: rgba(0, 0, 0, 0.06);
         --btn-hover: rgba(0, 0, 0, 0.08);
         --sep: rgba(0, 0, 0, 0.22);          /* separador fino entre pestañas inactivas */
       }
+      /* ── Quién decide el tema ──
+         La APP, no Windows: la web elige su modo con su propio botón (clase `dark` en su
+         <html>, defaultTheme claro, sin seguir al sistema), así que obedecer aquí al
+         prefers-color-scheme del sistema pintaba la barra negra sobre una app clara — el
+         bug de siempre. El script inyectado reporta el tema real, Rust lo reenvía en
+         `ls-tabs` (`dark`) y este documento se pone la clase `oscuro` o `claro`.
+         El bloque de medios queda SOLO como arranque en frío (primer arranque, sin
+         estado.json y sin reporte aún): en cuanto hay clase, la clase manda.
+         OJO: los valores oscuros van DOS veces (media query y .oscuro) — cambiarlos a la par. */
       @media (prefers-color-scheme: dark) {
-        :root {
+        :root:not(.claro) {
           --bg: #0d0d0f;        /* franja: negra, más oscura que el contenido */
           --fg: #bdc1c6;
           --muted: #80868b;
@@ -48,6 +58,17 @@
           --btn-hover: rgba(255, 255, 255, 0.1);
           --sep: rgba(255, 255, 255, 0.25);
         }
+      }
+      :root.oscuro {
+        --bg: #0d0d0f;
+        --fg: #bdc1c6;
+        --muted: #80868b;
+        --tab-active-bg: #18181b;
+        --tab-active-fg: #e8eaed;
+        --border: #26262a;
+        --hover: rgba(255, 255, 255, 0.08);
+        --btn-hover: rgba(255, 255, 255, 0.1);
+        --sep: rgba(255, 255, 255, 0.25);
       }
       * { box-sizing: border-box; }
       html, body {
@@ -168,9 +189,11 @@
       .tab[data-color]:not(.active)::before { display: none; }
       .tab[data-color].active { box-shadow: inset 0 3px 0 rgb(var(--tc)); }
       @media (prefers-color-scheme: dark) {
-        .tab[data-color]:not(.active) { background: rgba(var(--tc), 0.36); }
-        .tab[data-color]:not(.active):hover { background: rgba(var(--tc), 0.5); }
+        :root:not(.claro) .tab[data-color]:not(.active) { background: rgba(var(--tc), 0.36); }
+        :root:not(.claro) .tab[data-color]:not(.active):hover { background: rgba(var(--tc), 0.5); }
       }
+      :root.oscuro .tab[data-color]:not(.active) { background: rgba(var(--tc), 0.36); }
+      :root.oscuro .tab[data-color]:not(.active):hover { background: rgba(var(--tc), 0.5); }
       /* Reordenar arrastrando: NO se usa drag&drop de HTML5 (en el webview de la barra en
          macOS los eventos no llegan), sino eventos de puntero. Se apaga el arrastre nativo de
          WebKit para que no salga la imagen fantasma al mover una pestaña. */
@@ -508,6 +531,12 @@
         $pct.textContent = estado.zoom + "%";
         $pct.classList.toggle("activo", estado.zoom !== 100);
         $ver.textContent = estado.version ? "v" + estado.version : "";
+        // Tema: manda el de la APP (payload `dark`). Mientras Rust no sepa nada (null),
+        // no se pone clase y siguen las media queries del sistema como arranque en frío.
+        if (typeof estado.dark === "boolean") {
+          document.documentElement.classList.toggle("oscuro", estado.dark);
+          document.documentElement.classList.toggle("claro", !estado.dark);
+        }
         // En macOS la barra ES la fila del título: hay que dejar libre el semáforo.
         document.body.classList.toggle("mac", !!estado.mac);
         // En Windows también ES la fila del título, pero ahí los botones de ventana los
