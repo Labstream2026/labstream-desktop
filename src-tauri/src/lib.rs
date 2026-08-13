@@ -32,6 +32,8 @@
 // `core:default` también para el origen remoto (capabilities/default.json). Así no hace falta
 // declarar comandos propios en el ACL para páginas remotas.
 
+mod tracker;
+
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -1394,10 +1396,13 @@ pub fn run() {
                 }
             });
 
-            // Icono en la bandeja del sistema con menú Abrir / Salir.
+            // Icono en la bandeja: Abrir / estado del rastreador + pausa / Salir.
             let abrir = MenuItem::with_id(app, "abrir", "Abrir Labstream", true, None::<&str>)?;
             let salir = MenuItem::with_id(app, "salir", "Salir", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&abrir, &salir])?;
+            let (trk_estado, trk_toggle) = tracker::armar_menu(app.handle())?;
+            let sep1 = PredefinedMenuItem::separator(app)?;
+            let sep2 = PredefinedMenuItem::separator(app)?;
+            let menu = Menu::with_items(app, &[&abrir, &sep1, &trk_estado, &trk_toggle, &sep2, &salir])?;
 
             TrayIconBuilder::with_id("main-tray")
                 .icon(app.default_window_icon().unwrap().clone())
@@ -1410,6 +1415,7 @@ pub fn run() {
                         save_persisted(app);
                         app.exit(0);
                     }
+                    id if tracker::menu_event(app, id) => {}
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -1424,6 +1430,9 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // El sensor del rastreador: listener de vinculación + hilo de medición.
+            tracker::iniciar(app.handle());
 
             Ok(())
         })
