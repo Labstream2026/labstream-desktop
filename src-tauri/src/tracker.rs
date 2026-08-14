@@ -229,7 +229,11 @@ fn enviar<R: Runtime>(app: &AppHandle<R>) {
         pintar_menu(app, "sin vincular", &cfg);
         return;
     }
-    n.cola.drain(0..enviados.min(n.cola.len()));
+    // El largo se calcula ANTES del drain: dentro del argumento sería un préstamo inmutable
+    // mientras `n.cola` ya está prestado mutable — a través del MutexGuard (un deref
+    // explícito) el two-phase borrow no lo cubre, y no compila.
+    let hasta = enviados.min(n.cola.len());
+    n.cola.drain(0..hasta);
     if n.cola.len() > MAX_COLA_LOTES {
         let sobra = n.cola.len() - MAX_COLA_LOTES;
         n.cola.drain(0..sobra); // sin red por semanas: se suelta lo más viejo, no lo nuevo
