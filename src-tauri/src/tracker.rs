@@ -25,7 +25,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tauri::{menu::MenuItem, AppHandle, Listener, Manager, Runtime};
+use tauri::{menu::MenuItem, AppHandle, Emitter, Listener, Manager, Runtime};
 
 const API: &str = "https://os.labstreamsas.com/api/tracker";
 const TICK_SEG: u64 = 5;
@@ -243,6 +243,16 @@ fn enviar<R: Runtime>(app: &AppHandle<R>) {
     guardar_cola(app, &cola);
 }
 
+/// Manda un evento a la página SIN bloquear el hilo del que sale. Mismo motivo que
+/// `pintar_en_hilo`: un listener puede correr en el hilo principal, y cualquier cosa que
+/// espere a ese hilo desde ahí cuelga la app.
+fn avisar<R: Runtime>(app: &AppHandle<R>, evento: &'static str, payload: serde_json::Value) {
+    let h = app.clone();
+    thread::spawn(move || {
+        let _ = h.emit(evento, payload);
+    });
+}
+
 // ── Arranque: listener de vinculación + hilo del sensor ──
 pub fn iniciar<R: Runtime>(app: &AppHandle<R>) {
     let cfg = cargar_cfg(app);
@@ -270,8 +280,29 @@ pub fn iniciar<R: Runtime>(app: &AppHandle<R>) {
             n.cfg.clone()
         };
         guardar_cfg(&h, &cfg);
+        // ACUSE de recibo. Sin esto la página no puede distinguir «el sensor lo guardó» de
+        // «esta app es vieja y no había nadie escuchando», y cantaba éxito en falso dejando
+        // un equipo registrado que jamás reporta. Si no llega este evento, la página revoca.
+        avisar(&h, "ls-tracker-listo", json!({ "ok": true }));
         // Sin repintar aquí: el evento puede llegar en el hilo principal. El sensor ve el
         // token en su próximo tic (≤5 s) y actualiza la bandeja solo.
+    });
+
+    // La página pregunta cómo está ESTE equipo (¿ya vinculado? ¿en pausa?) para no ofrecer
+    // vincular lo que ya está vinculado y para poder avisar cuando falta hacerlo.
+    let h = app.clone();
+    app.listen_any("ls-tracker-consulta", move |_| {
+        let nucleo = h.state::<NucleoState>();
+        let cfg = nucleo.0.lock().unwrap().cfg.clone();
+        avisar(
+            &h,
+            "ls-tracker-estado",
+            json!({
+                "vinculado": cfg.token.is_some(),
+                "pausado": esta_pausado(&cfg),
+                "version": env!("CARGO_PKG_VERSION"),
+            }),
+        );
     });
 
     // El sensor: un hilo con tic de 5 s. Nada de esto toca la interfaz salvo el menú del tray.
