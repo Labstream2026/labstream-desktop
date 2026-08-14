@@ -39,6 +39,27 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   resultado. Es un popup nativo del sistema, igual en Windows y macOS, y vive
   solo en el shell (la web app no se toca).
 
+- **Rastreador de trabajo efectivo** (v1.8.0, `src-tauri/src/tracker.rs`): mide
+  cuánto tiempo se trabaja de verdad y en qué aplicación, y lo publica en
+  **Reportes → Equipo** del servidor. Cada 5 s mira la ventana al frente y si
+  hubo entrada de ratón/teclado; **con 3 minutos sin entrada deja de contar**
+  (eso cubre también pantalla bloqueada y suspensión). Sube lotes cada 5 min a
+  `POST /api/tracker`; sin red, la cola espera en disco y reintenta.
+  - **Qué NO registra, a propósito:** ni qué teclas se pulsan (solo compara una
+    huella de posición del ratón y cuántas teclas hay presionadas), ni
+    pantallazos, ni el contenido de nada, ni los procesos de fondo.
+  - **Se ve y se pausa**: el menú de la bandeja dice el estado («registrando»,
+    «inactivo», «en pausa») y pausa/reanuda de un toque.
+  - **Se vincula** desde el servidor: Ajustes ▸ Perfil ▸ *Vincular este equipo*,
+    **estando dentro de esta app**. El servidor genera el token del equipo y se
+    lo entrega al sensor por el evento `ls-tracker-token`; el secreto nunca se
+    enseña ni se copia a mano. Revocar el equipo (misma pantalla) lo corta al
+    instante: el siguiente lote recibe 401, el sensor tira el token y la bandeja
+    vuelve a «sin vincular».
+  - En **macOS** el sistema pide permiso de *Accesibilidad* la primera vez (para
+    leer el título de la ventana al frente); sin él, el sensor mide tiempo pero
+    no sabe decir en qué app.
+
 La barra de pestañas vive en `dist/index.html` (webview local «chrome»); las
 pestañas son webviews hijos `tab-*`. Shell ↔ Rust se hablan por eventos `ls-*`.
 

@@ -28,3 +28,12 @@ tauri-plugin-updater = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# ── Rastreador de trabajo efectivo (src/tracker.rs) ──
+# active-win-pos-rs: la ventana al frente (app + título) en Win/Mac.
+# device_query: ¿hubo entrada? (huella de mouse/teclas presionadas; NUNCA qué se tecleó).
+# ureq: subir los lotes a /api/tracker (bloqueante, corre en su propio hilo).
+# gethostname: el nombre del equipo, que bautiza al device en el servidor.
+active-win-pos-rs = "0.11"
+device_query = "4"
+ureq = { version = "2", features = ["json"] }
+gethostname = "0.5"
