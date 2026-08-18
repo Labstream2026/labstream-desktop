@@ -32,6 +32,15 @@ const TICK_SEG: u64 = 5;
 const OCIO_PROFUNDO_SEG: u64 = 180; // 3 min sin entrada → deja de contar
 const LOTE_SEG: u64 = 300; // subir cada 5 min
 const MAX_COLA_LOTES: usize = 2000; // ~1 semana sin red; después se pierde lo más viejo
+// Un tramo de ocio se cierra SOLO a las 4 h: más que eso sin tocar el equipo no es un descanso
+// frente a la pantalla, es ausencia — y sin este tope, una torre que nunca se suspende anotaría
+// «14 h inactivo» por una noche con la pantalla bloqueada. Pasado el tope no se reabre nada
+// hasta que vuelva la entrada.
+const OCIO_MAX_TRAMO_SEG: u64 = 4 * 3600;
+// Lotes por intento de subida. Sin tope, al volver la red tras días sin ella los cientos de
+// POST seguidos bloquean el hilo del sensor más de un minuto y el siguiente tic diagnostica
+// una «suspensión» que nunca ocurrió. La cola se drena en varios ciclos de 5 min.
+const MAX_LOTES_POR_ENVIO: usize = 12;
 const PAUSA_MANUAL: u64 = u64::MAX;
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -51,10 +60,36 @@ struct Bloque {
     t: String, // título de ventana (truncado; puede ir vacío)
 }
 
+// Un tramo de INACTIVIDAD: desde que se cruzó el umbral de 3 min sin entrada hasta que volvió
+// a haberla. Los primeros 3 min siguen contando como trabajo (igual que siempre); esto anota
+// lo de ahí en adelante. Sin app ni título a propósito: la inactividad no tiene contenido.
+#[derive(Serialize, Deserialize, Clone)]
+struct Ocio {
+    s: u64, // inicio en ms unix
+    d: u32, // segundos quieto (más allá del umbral)
+}
+
+// Un lote: bloques de trabajo + tramos de ocio del mismo intervalo.
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct Lote {
+    b: Vec<Bloque>,
+    #[serde(default)]
+    i: Vec<Ocio>,
+}
+
+// La cola en disco de la 1.8 era `Vec<Vec<Bloque>>` (solo bloques). Este enum lee AMBOS
+// formatos: al actualizar, lo que quedó pendiente de subir no se pierde.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LoteEnDisco {
+    Nuevo(Lote),
+    Viejo(Vec<Bloque>),
+}
+
 // Estado compartido sensor ↔ menú. Los items de menú viven aparte (son genéricos en R).
 struct Nucleo {
     cfg: Config,
-    cola: Vec<Vec<Bloque>>, // lotes pendientes de subir
+    cola: Vec<Lote>, // lotes pendientes de subir
 }
 
 struct NucleoState(Mutex<Nucleo>);
@@ -77,6 +112,25 @@ fn ruta_cfg<R: Runtime>(app: &AppHandle<R>) -> Option<std::path::PathBuf> {
 fn ruta_cola<R: Runtime>(app: &AppHandle<R>) -> Option<std::path::PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("rastreador-cola.json"))
 }
+// El tramo de ocio EN CURSO, persistido para sobrevivir a apagados y a la auto-actualización
+// (que reinicia la app de todo el equipo a la vez). La suspensión no lo necesita —el mismo
+// proceso despierta y lo cierra—, pero si el proceso MUERE con un tramo abierto, sin esto el
+// descanso se perdía entero. Contiene {t: último tic (seg), o: inicio del tramo (ms)}.
+fn ruta_encurso<R: Runtime>(app: &AppHandle<R>) -> Option<std::path::PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("rastreador-encurso.json"))
+}
+fn guardar_encurso<R: Runtime>(app: &AppHandle<R>, tic: u64, inicio_ms: u64) {
+    let Some(p) = ruta_encurso(app) else { return };
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(p, format!("{{\"t\":{tic},\"o\":{inicio_ms}}}"));
+}
+fn borrar_encurso<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(p) = ruta_encurso(app) {
+        let _ = std::fs::remove_file(p);
+    }
+}
 
 fn cargar_cfg<R: Runtime>(app: &AppHandle<R>) -> Config {
     ruta_cfg(app)
@@ -93,13 +147,20 @@ fn guardar_cfg<R: Runtime>(app: &AppHandle<R>, cfg: &Config) {
         let _ = std::fs::write(p, txt);
     }
 }
-fn cargar_cola<R: Runtime>(app: &AppHandle<R>) -> Vec<Vec<Bloque>> {
-    ruta_cola(app)
+fn cargar_cola<R: Runtime>(app: &AppHandle<R>) -> Vec<Lote> {
+    let crudo: Vec<LoteEnDisco> = ruta_cola(app)
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    crudo
+        .into_iter()
+        .map(|l| match l {
+            LoteEnDisco::Nuevo(x) => x,
+            LoteEnDisco::Viejo(b) => Lote { b, i: Vec::new() },
+        })
+        .collect()
 }
-fn guardar_cola<R: Runtime>(app: &AppHandle<R>, cola: &[Vec<Bloque>]) {
+fn guardar_cola<R: Runtime>(app: &AppHandle<R>, cola: &[Lote]) {
     let Some(p) = ruta_cola(app) else { return };
     if cola.is_empty() {
         let _ = std::fs::remove_file(p);
@@ -194,7 +255,9 @@ fn enviar<R: Runtime>(app: &AppHandle<R>) {
         if n.cola.is_empty() {
             return;
         }
-        (t, n.cola.clone())
+        // Con tope por llamada: la cola grande (días sin red) se drena a lo largo de varios
+        // ciclos en vez de bloquear el hilo del sensor con cientos de POST seguidos.
+        (t, n.cola.iter().take(MAX_LOTES_POR_ENVIO).cloned().collect::<Vec<Lote>>())
     };
     let hostname = gethostname::gethostname().to_string_lossy().to_string();
     let version = app.package_info().version.to_string();
@@ -206,7 +269,8 @@ fn enviar<R: Runtime>(app: &AppHandle<R>) {
             .timeout(Duration::from_secs(20))
             .send_json(json!({
                 "device": { "hostname": hostname, "platform": std::env::consts::OS, "version": version },
-                "blocks": lote,
+                "blocks": lote.b,
+                "idles": lote.i,
             }));
         match r {
             Ok(_) => enviados += 1,
@@ -312,8 +376,44 @@ pub fn iniciar<R: Runtime>(app: &AppHandle<R>) {
         let mut ultimo_input = ahora_seg();
         let mut huella_anterior: (i32, i32, usize) = (0, 0, 0);
         let mut acumulado: HashMap<(String, String), Bloque> = HashMap::new();
+        let mut ocios_pendientes: Vec<Ocio> = Vec::new();
+        // Inicio (ms) del tramo de inactividad en curso, si lo hay.
+        let mut ocio_abierto: Option<u64> = None;
+        let mut ocioso_antes = false;
+        let mut tic_previo = ahora_seg();
         let mut ultimo_envio = ahora_seg();
         let mut ultimo_estado = String::new();
+        let mut encurso_guardado: u64 = 0;
+
+        // ¿La sesión anterior murió con un tramo de ocio abierto (apagado, cierre de la app,
+        // auto-actualización)? Se cierra en su último latido y se encola: el descanso fue
+        // real y medido — perderlo entero hacía mentir al README.
+        {
+            #[derive(Deserialize)]
+            struct EnCurso {
+                t: u64,
+                o: u64,
+            }
+            let previo: Option<EnCurso> = ruta_encurso(&h)
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|s| serde_json::from_str(&s).ok());
+            if let Some(e) = previo {
+                let fin = (e.t + TICK_SEG) * 1000;
+                if fin > e.o {
+                    let d = ((fin - e.o) / 1000).min(OCIO_MAX_TRAMO_SEG) as u32;
+                    if d >= 60 {
+                        let nucleo = h.state::<NucleoState>();
+                        let cola = {
+                            let mut n = nucleo.0.lock().unwrap();
+                            n.cola.push(Lote { b: Vec::new(), i: vec![Ocio { s: e.o, d }] });
+                            n.cola.clone()
+                        };
+                        guardar_cola(&h, &cola);
+                    }
+                }
+            }
+            borrar_encurso(&h);
+        }
 
         loop {
             thread::sleep(Duration::from_secs(TICK_SEG));
@@ -324,6 +424,30 @@ pub fn iniciar<R: Runtime>(app: &AppHandle<R>) {
                 let n = nucleo.0.lock().unwrap();
                 (n.cfg.token.is_some(), esta_pausado(&n.cfg))
             };
+
+            // ¿Se SUSPENDIÓ el equipo? Sin tics durante mucho más que un tic = la máquina
+            // durmió (suspensión, hibernación, tapa cerrada). La noche del portátil NO es
+            // inactividad: el tramo abierto se CIERRA en el último tic visto y el reloj de
+            // entrada arranca de cero al despertar — si no, el sensor anotaría «12 h quieto»
+            // por una noche apagado, y al despertar abriría tramos que empiezan ayer.
+            let dormido = ahora.saturating_sub(tic_previo) > TICK_SEG * 12; // > 1 min sin tics
+            if dormido {
+                if let Some(ini) = ocio_abierto.take() {
+                    let fin = (tic_previo + TICK_SEG) * 1000;
+                    if fin > ini {
+                        ocios_pendientes.push(Ocio { s: ini, d: ((fin - ini) / 1000) as u32 });
+                    }
+                    borrar_encurso(&h);
+                }
+                // Al despertar, el reloj de entrada queda EXACTAMENTE en el umbral: seguimos
+                // ociosos hasta que alguien toque algo de verdad. Dejarlo en `ahora` parecía
+                // más natural, pero hacía que los 3 min siguientes contaran como TRABAJO sin
+                // una sola entrada — y los despertares automáticos de Windows (mantenimiento,
+                // wake timers a las 3 a. m.) fabricaban jornadas fantasma de madrugada.
+                ultimo_input = ahora.saturating_sub(OCIO_PROFUNDO_SEG);
+                ocioso_antes = false;
+            }
+            tic_previo = ahora;
 
             // ¿Hubo entrada desde el último tic? Solo se compara una huella (posición del
             // mouse + cuántas teclas hay presionadas): nunca se registra QUÉ se tecleó.
@@ -338,12 +462,73 @@ pub fn iniciar<R: Runtime>(app: &AppHandle<R>) {
             }
             let ocioso = ahora.saturating_sub(ultimo_input) >= OCIO_PROFUNDO_SEG;
 
+            // ── El tramo de inactividad ──
+            // Abre cuando se cruza el umbral (retrocedido al minuto exacto en que se dejó de
+            // contar trabajo: ultimo_input + umbral) y cierra cuando vuelve la entrada. En
+            // pausa o sin vincular no se anota nada: pausar es «no me midas», y eso incluye
+            // la inactividad.
+            if token_ok && !pausado {
+                if ocioso && !ocioso_antes {
+                    let ini = (ultimo_input + OCIO_PROFUNDO_SEG) * 1000;
+                    ocio_abierto = Some(ini);
+                    guardar_encurso(&h, ahora, ini);
+                    encurso_guardado = ahora;
+                } else if !ocioso && ocioso_antes {
+                    if let Some(ini) = ocio_abierto.take() {
+                        let fin = ahora * 1000;
+                        if fin > ini {
+                            ocios_pendientes.push(Ocio { s: ini, d: ((fin - ini) / 1000) as u32 });
+                        }
+                        borrar_encurso(&h);
+                    }
+                }
+            } else {
+                if let Some(ini) = ocio_abierto.take() {
+                    // Se pausó o se desvinculó a mitad de un tramo: lo quieto HASTA ese
+                    // momento fue real y medido — se cierra aquí; de la pausa en adelante ya
+                    // no es asunto del sensor. Sin token (desvinculado) se descarta.
+                    if token_ok {
+                        let fin = ahora * 1000;
+                        if fin > ini {
+                            ocios_pendientes.push(Ocio { s: ini, d: ((fin - ini) / 1000) as u32 });
+                        }
+                    }
+                    borrar_encurso(&h);
+                }
+                ocioso_antes = false;
+                // El reloj de ocio parte de cero mientras dure la pausa: sin esto, reanudar
+                // estando quieto abriría un tramo retrocedido hasta DENTRO de la pausa —
+                // anotando como inactividad un rato que el editor pidió expresamente no medir.
+                ultimo_input = ahora;
+            }
+            if token_ok && !pausado {
+                ocioso_antes = ocioso;
+            }
+
+            // El tope del tramo: a las 4 h se cierra y NO se reabre (ocioso_antes queda en
+            // true, así que la transición de apertura no vuelve a disparar hasta que haya
+            // entrada real). Más de eso no es descanso frente al equipo, es ausencia.
+            if let Some(ini) = ocio_abierto {
+                if (ahora * 1000).saturating_sub(ini) >= OCIO_MAX_TRAMO_SEG * 1000 {
+                    ocio_abierto = None;
+                    ocios_pendientes.push(Ocio { s: ini, d: OCIO_MAX_TRAMO_SEG as u32 });
+                    borrar_encurso(&h);
+                } else if ahora.saturating_sub(encurso_guardado) >= 60 {
+                    // Latido del tramo abierto (1/min): si el proceso muere, al arrancar se
+                    // cierra en el último latido en vez de perderse entero.
+                    guardar_encurso(&h, ahora, ini);
+                    encurso_guardado = ahora;
+                }
+            }
+
             let estado = if !token_ok {
                 "sin vincular"
             } else if pausado {
                 "en pausa"
             } else if ocioso {
-                "inactivo (no cuenta)"
+                // Desde la 1.9 el tramo quieto SÍ queda anotado (aparte de las horas
+                // efectivas); la bandeja lo dice para que la medición siga siendo transparente.
+                "inactivo (se anota aparte)"
             } else {
                 "registrando"
             };
@@ -377,11 +562,15 @@ pub fn iniciar<R: Runtime>(app: &AppHandle<R>) {
                 }
             }
 
-            // Cada 5 min: el acumulado pasa a la cola y se intenta subir todo.
+            // Cada 5 min: el acumulado (trabajo + ocio cerrado) pasa a la cola y se intenta
+            // subir todo. Un tramo de ocio AÚN abierto no viaja: se sube cuando cierre.
             if ahora.saturating_sub(ultimo_envio) >= LOTE_SEG {
                 ultimo_envio = ahora;
-                if !acumulado.is_empty() {
-                    let lote: Vec<Bloque> = acumulado.drain().map(|(_, b)| b).collect();
+                if !acumulado.is_empty() || !ocios_pendientes.is_empty() {
+                    let lote = Lote {
+                        b: acumulado.drain().map(|(_, b)| b).collect(),
+                        i: std::mem::take(&mut ocios_pendientes),
+                    };
                     let nucleo = h.state::<NucleoState>();
                     let cola = {
                         let mut n = nucleo.0.lock().unwrap();
@@ -391,6 +580,10 @@ pub fn iniciar<R: Runtime>(app: &AppHandle<R>) {
                     guardar_cola(&h, &cola);
                 }
                 enviar(&h);
+                // Lo que tardó la subida NO fue una suspensión: sin este refresco, una tanda
+                // lenta (>1 min) hacía que el siguiente tic entrara por la rama `dormido` y
+                // cortara en falso el tramo de ocio abierto.
+                tic_previo = ahora_seg();
             }
         }
     });

@@ -39,12 +39,22 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   resultado. Es un popup nativo del sistema, igual en Windows y macOS, y vive
   solo en el shell (la web app no se toca).
 
-- **Rastreador de trabajo efectivo** (v1.8.0, `src-tauri/src/tracker.rs`): mide
-  cuánto tiempo se trabaja de verdad y en qué aplicación, y lo publica en
-  **Reportes → Equipo** del servidor. Cada 5 s mira la ventana al frente y si
+- **Rastreador de trabajo efectivo** (v1.9.0, `src-tauri/src/tracker.rs`): mide
+  cuánto tiempo se trabaja de verdad y en qué aplicación, y lo publica en el
+  panel **/rastreo** del servidor. Cada 5 s mira la ventana al frente y si
   hubo entrada de ratón/teclado; **con 3 minutos sin entrada deja de contar**
   (eso cubre también pantalla bloqueada y suspensión). Sube lotes cada 5 min a
   `POST /api/tracker`; sin red, la cola espera en disco y reintenta.
+  - **Desde la 1.9 también ANOTA la inactividad**: cuando se cruza el umbral de
+    3 min, el tramo quieto queda registrado aparte (solo desde/hasta — sin app,
+    sin título, sin contenido) y el panel lo enseña junto a cada jornada. La
+    bandeja lo dice («inactivo (se anota aparte)»). Suspender o apagar el
+    equipo NO cuenta como inactividad: el tramo se corta ahí — la noche con el
+    portátil cerrado es una laguna, no un dato (el tramo en curso se guarda a
+    disco cada minuto, así que un apagado o la auto-actualización lo cierran en
+    su último latido en vez de perderlo). Y un tramo se cierra solo a las 4 h:
+    más que eso sin tocar el equipo es ausencia, no descanso frente a la
+    pantalla. En pausa no se anota nada.
   - **Qué NO registra, a propósito:** ni qué teclas se pulsan (solo compara una
     huella de posición del ratón y cuántas teclas hay presionadas), ni
     pantallazos, ni el contenido de nada, ni los procesos de fondo.
