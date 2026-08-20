@@ -1,6 +1,6 @@
 [package]
 name = "labstream-desktop"
-version = "1.9.0"
+version = "1.10.0"
 description = "Cliente de escritorio de Labstream OS"
 authors = ["Labstream SAS"]
 edition = "2021"
@@ -37,3 +37,21 @@ active-win-pos-rs = "0.11"
 device_query = "4"
 ureq = { version = "2", features = ["json"] }
 gethostname = "0.5"
+
+# ── Excepción del video (Windows) ──
+# Para saber si «hay un video reproduciéndose» sin espiar el navegador: se mira el MEDIDOR de
+# la salida de audio por defecto (WASAPI, IAudioMeterInformation). Si al frente hay un navegador
+# y está saliendo sonido, es un video sonando → cuenta como navegador, no como inactividad.
+# Solo Windows: en macOS no hay API pública sencilla de nivel de audio por app (el equipo de
+# edición es Windows). El `windows` crate ya está en la caché por Tauri.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    # IMMDevice::Activate exige AMBAS (su firma lleva un PROPVARIANT): sin ellas el método
+    # queda cfg'd out y «no existe». Verificado con cargo check --target windows-msvc.
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+] }

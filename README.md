@@ -39,7 +39,7 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   resultado. Es un popup nativo del sistema, igual en Windows y macOS, y vive
   solo en el shell (la web app no se toca).
 
-- **Rastreador de trabajo efectivo** (v1.9.0, `src-tauri/src/tracker.rs`): mide
+- **Rastreador de trabajo efectivo** (v1.10.0, `src-tauri/src/tracker.rs`): mide
   cuánto tiempo se trabaja de verdad y en qué aplicación, y lo publica en el
   panel **/rastreo** del servidor. Cada 5 s mira la ventana al frente y si
   hubo entrada de ratón/teclado; **con 3 minutos sin entrada deja de contar**
@@ -55,6 +55,15 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
     su último latido en vez de perderlo). Y un tramo se cierra solo a las 4 h:
     más que eso sin tocar el equipo es ausencia, no descanso frente a la
     pantalla. En pausa no se anota nada.
+  - **Desde la 1.10, la excepción del VIDEO** (solo Windows): si no hay entrada
+    PERO al frente hay un navegador (Chrome/Brave/Edge/Firefox…) y está saliendo
+    sonido —un video reproduciéndose—, ese rato NO se anota como inactividad: se
+    cuenta como tiempo de navegador (con 0 segundos «activos», porque no se
+    teclea). Se detecta con el medidor de audio del sistema (WASAPI,
+    `IAudioMeterInformation`): no abre el navegador, no lee la pestaña, no graba
+    nada — solo pregunta si hay sonido saliendo. Límite honesto: un video **mudo**
+    no se detecta (no suena). En macOS no aplica (no hay API pública sencilla de
+    nivel de audio); el equipo de edición es Windows.
   - **Qué NO registra, a propósito:** ni qué teclas se pulsan (solo compara una
     huella de posición del ratón y cuántas teclas hay presionadas), ni
     pantallazos, ni el contenido de nada, ni los procesos de fondo.

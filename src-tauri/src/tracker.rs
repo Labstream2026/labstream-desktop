@@ -244,6 +244,52 @@ fn normaliza(s: &str, max: usize) -> String {
     limpio.chars().take(max).collect()
 }
 
+// ── Excepción del video ──
+// ¿La ventana al frente es un NAVEGADOR? El servidor ya clasifica el sitio por el título; aquí
+// solo hace falta saber que es un navegador para aplicar la excepción del video. Se excluye el
+// host WebView2 (el motor de Edge embebido que usa ESTA misma app y otras de escritorio): no es
+// navegación de nadie, igual que en el servidor.
+fn es_navegador(app: &str) -> bool {
+    let a = app.to_lowercase();
+    if a.contains("webview") {
+        return false;
+    }
+    ["chrome", "brave", "edge", "firefox", "opera", "vivaldi"].iter().any(|n| a.contains(n))
+}
+
+// ¿Está saliendo SONIDO por la salida de audio por defecto? Es el proxy de «hay un video
+// reproduciéndose»: se lee el medidor de pico de WASAPI (IAudioMeterInformation) del dispositivo
+// de salida. No abre el navegador, no lee la pestaña, no graba nada — solo pregunta al sistema
+// si hay sonido saliendo AHORA. Un video mudo no se detecta (no suena); es el límite honesto de
+// medirlo desde fuera del navegador.
+#[cfg(windows)]
+fn hay_audio_sonando() -> bool {
+    use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
+    use windows::Win32::Media::Audio::{eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator};
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+    unsafe {
+        let Ok(enumerador) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) else {
+            return false;
+        };
+        // eMultimedia = el endpoint que usan música y video (no el de comunicaciones).
+        let Ok(dispositivo) = enumerador.GetDefaultAudioEndpoint(eRender, eMultimedia) else {
+            return false; // sin dispositivo de salida (p. ej. sin tarjeta/monitor de audio)
+        };
+        let Ok(medidor) = dispositivo.Activate::<IAudioMeterInformation>(CLSCTX_ALL, None) else {
+            return false;
+        };
+        // Umbral pequeño para no dispararse con el ruido de fondo del silencio digital.
+        matches!(medidor.GetPeakValue(), Ok(pico) if pico > 0.01)
+    }
+}
+
+#[cfg(not(windows))]
+fn hay_audio_sonando() -> bool {
+    // macOS: no hay API pública sencilla de nivel de audio; la excepción del video no aplica aquí
+    // (el equipo de edición es Windows). Follow-up posible con CoreAudio. false = como siempre.
+    false
+}
+
 // ── Envío ──
 // Sube la cola entera; deja en la cola lo que no pudo. Un 401 = token revocado → se descarta
 // el token (la bandeja pasa a «sin vincular») y la cola se vacía: ya nadie la quiere.
@@ -372,6 +418,15 @@ pub fn iniciar<R: Runtime>(app: &AppHandle<R>) {
     // El sensor: un hilo con tic de 5 s. Nada de esto toca la interfaz salvo el menú del tray.
     let h = app.clone();
     thread::spawn(move || {
+        // COM para este hilo: lo necesita la lectura del medidor de audio (WASAPI) de la
+        // excepción del video. Se hace UNA vez al arrancar el hilo; si ya estaba inicializado,
+        // devuelve S_FALSE y no pasa nada. En macOS no existe y se omite.
+        #[cfg(windows)]
+        unsafe {
+            use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+
         let device_state = device_query::DeviceState::new();
         let mut ultimo_input = ahora_seg();
         let mut huella_anterior: (i32, i32, usize) = (0, 0, 0);
@@ -462,18 +517,40 @@ pub fn iniciar<R: Runtime>(app: &AppHandle<R>) {
             }
             let ocioso = ahora.saturating_sub(ultimo_input) >= OCIO_PROFUNDO_SEG;
 
+            // ── Ventana al frente + excepción del VIDEO ──
+            // La ventana se lee cada tic mientras se mide (antes solo cuando había actividad):
+            // ahora hace falta AUNQUE se esté ocioso, para saber si al frente hay un video.
+            let ventana = if token_ok && !pausado {
+                active_win_pos_rs::get_active_window()
+                    .ok()
+                    .map(|v| (normaliza(&v.app_name, 80), normaliza(&v.title, 140)))
+            } else {
+                None
+            };
+            // Sin entrada PERO con un navegador al frente y sonido saliendo = un video
+            // reproduciéndose. El usuario lo pidió: eso NO es inactividad, cuenta como tiempo de
+            // navegador (abajo se acumula el bloque con a=0, porque no hubo entrada). Solo se
+            // consulta el audio en ese caso puntual (ocioso + navegador al frente), no en cada tic.
+            let viendo_video = ocioso
+                && ventana.as_ref().map(|(app, _)| es_navegador(app)).unwrap_or(false)
+                && hay_audio_sonando();
+            // La inactividad EFECTIVA: quieto de verdad, salvo que sea un video en primer plano.
+            // Todo lo de abajo (tramo de ocio, bandeja, acumulación) usa esta, no `ocioso`.
+            let ocioso_efectivo = ocioso && !viendo_video;
+
             // ── El tramo de inactividad ──
             // Abre cuando se cruza el umbral (retrocedido al minuto exacto en que se dejó de
-            // contar trabajo: ultimo_input + umbral) y cierra cuando vuelve la entrada. En
+            // contar trabajo: ultimo_input + umbral) y cierra cuando vuelve la entrada —o cuando
+            // arranca un video en primer plano, que cuenta como actividad de navegador. En
             // pausa o sin vincular no se anota nada: pausar es «no me midas», y eso incluye
             // la inactividad.
             if token_ok && !pausado {
-                if ocioso && !ocioso_antes {
+                if ocioso_efectivo && !ocioso_antes {
                     let ini = (ultimo_input + OCIO_PROFUNDO_SEG) * 1000;
                     ocio_abierto = Some(ini);
                     guardar_encurso(&h, ahora, ini);
                     encurso_guardado = ahora;
-                } else if !ocioso && ocioso_antes {
+                } else if !ocioso_efectivo && ocioso_antes {
                     if let Some(ini) = ocio_abierto.take() {
                         let fin = ahora * 1000;
                         if fin > ini {
@@ -502,7 +579,7 @@ pub fn iniciar<R: Runtime>(app: &AppHandle<R>) {
                 ultimo_input = ahora;
             }
             if token_ok && !pausado {
-                ocioso_antes = ocioso;
+                ocioso_antes = ocioso_efectivo;
             }
 
             // El tope del tramo: a las 4 h se cierra y NO se reabre (ocioso_antes queda en
@@ -525,7 +602,10 @@ pub fn iniciar<R: Runtime>(app: &AppHandle<R>) {
                 "sin vincular"
             } else if pausado {
                 "en pausa"
-            } else if ocioso {
+            } else if viendo_video {
+                // Ocioso, pero con un video en primer plano: se cuenta como navegador.
+                "video en primer plano"
+            } else if ocioso_efectivo {
                 // Desde la 1.9 el tramo quieto SÍ queda anotado (aparte de las horas
                 // efectivas); la bandeja lo dice para que la medición siga siendo transparente.
                 "inactivo (se anota aparte)"
@@ -542,10 +622,13 @@ pub fn iniciar<R: Runtime>(app: &AppHandle<R>) {
                 ultimo_estado = estado.to_string();
             }
 
-            if token_ok && !pausado && !ocioso {
-                if let Ok(v) = active_win_pos_rs::get_active_window() {
-                    let app_name = normaliza(&v.app_name, 80);
-                    let titulo = normaliza(&v.title, 140);
+            // Se acumula la ventana al frente cuando NO hay inactividad efectiva: o sea, con
+            // actividad real, O con un video en primer plano (viendo_video → ocioso_efectivo es
+            // false). En el caso del video, `hubo_input` es false, así que el bloque suma
+            // segundos de navegador pero 0 activos — honesto: presente, sin teclear. Se usa la
+            // `ventana` ya leída arriba, sin volver a preguntar al sistema.
+            if token_ok && !pausado && !ocioso_efectivo {
+                if let Some((app_name, titulo)) = ventana.clone() {
                     if !app_name.is_empty() {
                         let b = acumulado.entry((app_name.clone(), titulo.clone())).or_insert_with(|| Bloque {
                             s: ahora_ms(),
