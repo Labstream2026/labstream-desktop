@@ -264,6 +264,17 @@
         height: 26px;
         font-size: 15px;
       }
+      /* «+» de nueva pestaña, DENTRO de la tira y pegado a la última pestaña (estilo Chrome).
+         Hereda de `button` (transparente, redondo, hover); solo fija tamaño, evita estirarse
+         y se separa un pelín de la última pestaña. Bottom-alineado con las pestañas. */
+      .nueva-tab {
+        flex: 0 0 auto;
+        width: 28px;
+        height: 28px;
+        margin: 0 2px 6px 4px;
+        font-size: 18px;
+        line-height: 1;
+      }
       #zoom {
         flex: 0 0 auto;
         display: flex;
@@ -325,8 +336,9 @@
     <div id="bar" data-tauri-drag-region>
       <button class="icono" id="atras" title="Atrás (⌘/Ctrl+[)">←</button>
       <button class="icono" id="adelante" title="Adelante (⌘/Ctrl+])">→</button>
+      <!-- El botón «+» de nueva pestaña ya NO va aquí fijo: se dibuja DENTRO de #tabs, pegado a
+           la última pestaña (estilo Chrome), en render(). Ver `.nueva-tab`. -->
       <div id="tabs" data-tauri-drag-region></div>
-      <button class="icono" id="nueva" title="Nueva pestaña (⌘/Ctrl+T)">+</button>
       <button class="icono" id="recargar" title="Recargar (⌘/Ctrl+R)">⟳</button>
       <div id="zoom">
         <button id="z-menos" title="Alejar (⌘/Ctrl+−)">−</button>
@@ -523,6 +535,15 @@
 
           $tabs.appendChild(el);
         }
+        // El «+» de nueva pestaña, PEGADO a la última (estilo Chrome): al vivir dentro de #tabs
+        // como último elemento (flex 0 0 auto), queda justo tras la última pestaña en vez de
+        // fijo a la derecha de la barra. El hueco libre después de él sigue moviendo la ventana.
+        const mas = document.createElement("button");
+        mas.className = "nueva-tab";
+        mas.textContent = "+";
+        mas.title = "Nueva pestaña (⌘/Ctrl+T)";
+        mas.addEventListener("click", () => emitir("ls-new-tab", {}));
+        $tabs.appendChild(mas);
         requestAnimationFrame(ajustarCompactas);
 
         const activa = $tabs.querySelector(".tab.active");
@@ -560,7 +581,6 @@
 
       document.getElementById("atras").addEventListener("click", () => emitir("ls-nav", { dir: -1 }));
       document.getElementById("adelante").addEventListener("click", () => emitir("ls-nav", { dir: 1 }));
-      document.getElementById("nueva").addEventListener("click", () => emitir("ls-new-tab", {}));
       document.getElementById("recargar").addEventListener("click", () => emitir("ls-reload", {}));
       // Menú de OPCIONES de la app (nativo, lo pinta Rust): botón ⋮ o clic derecho en la barra.
       document.getElementById("menu").addEventListener("click", () => emitir("ls-menu", {}));
