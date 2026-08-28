@@ -32,6 +32,7 @@
 // `core:default` también para el origen remoto (capabilities/default.json). Así no hace falta
 // declarar comandos propios en el ACL para páginas remotas.
 
+mod cache;
 mod tracker;
 
 use std::sync::Mutex;
@@ -222,6 +223,74 @@ const INIT_JS_TPL: &str = r#"
     catch (e) { try { T.opener.openUrl(url); } catch (_) {} }
   }
   function newTab(url) { emit('ls-new-tab', { url: url }); }
+
+  // ── Miniaturas por el CAJÓN de la app (lsthumb://) ──
+  // Dentro de la app de escritorio, las miniaturas de la cuadrícula de fotos se piden por el
+  // esquema lsthumb:// en vez de directo al servidor. Así las sirve el cajón local (Rust): del
+  // disco si ya están —sobreviven a cerrar la app, que es lo que se pedía— y del NAS solo la
+  // primera vez. Fuera de la app (navegador normal) este script no corre y todo sigue igual.
+  //
+  // Se reescribe SOLO la miniatura de 480 px (thumb=1): es la que se repite 500 veces por set y
+  // ahoga la cuadrícula. El visor grande (thumb=xl) y la anotación sobre lienzo NO se tocan —
+  // cargar la imagen del lienzo por otro esquema lo «ensuciaría» y rompería «guardar el dibujo».
+  try {
+    function porCajon(src) {
+      if (!src || src.lastIndexOf('lsthumb:', 0) === 0) return src; // ya reescrita
+      var u = abs(src);
+      if (!u || u.origin !== ORIGIN) return src;                    // solo lo del propio servidor
+      if (!/\/api\/files-asset\//.test(u.pathname) || u.searchParams.get('thumb') !== '1') return src;
+      return 'lsthumb://c/?u=' + encodeURIComponent(u.href);
+    }
+    var proto = HTMLImageElement.prototype;
+    // 1) La propiedad .src (lo que usa React al asignar la imagen).
+    var d = Object.getOwnPropertyDescriptor(proto, 'src');
+    if (d && d.get && d.set) {
+      Object.defineProperty(proto, 'src', {
+        configurable: true, enumerable: d.enumerable,
+        get: function () { return d.get.call(this); },
+        set: function (v) { d.set.call(this, porCajon(String(v))); },
+      });
+    }
+    // 2) setAttribute('src', …), que no pasa por el setter de la propiedad. Se parchea SOLO en
+    //    <img> (prototipo de HTMLImageElement), no en todos los elementos.
+    var setA = proto.setAttribute;
+    proto.setAttribute = function (name, value) {
+      if (arguments.length >= 2 && String(name).toLowerCase() === 'src') {
+        return setA.call(this, name, porCajon(String(value)));
+      }
+      return setA.apply(this, arguments);
+    };
+    // 3) Las que ya vienen en el HTML del servidor (SSR) o llegan luego. porCajon es idempotente
+    //    (una ya reescrita se devuelve igual), así que barrer no entra en bucle con el observer.
+    function barrer(raiz) {
+      if (!raiz || !raiz.querySelectorAll) return;
+      var imgs = raiz.querySelectorAll('img[src]');
+      for (var i = 0; i < imgs.length; i++) {
+        var cur = imgs[i].getAttribute('src');
+        var nue = porCajon(cur);
+        if (nue !== cur) imgs[i].setAttribute('src', nue);
+      }
+    }
+    if (window.MutationObserver) {
+      new MutationObserver(function (muts) {
+        for (var i = 0; i < muts.length; i++) {
+          var m = muts[i];
+          if (m.type === 'attributes' && m.target && m.target.tagName === 'IMG') {
+            var cur = m.target.getAttribute('src'), nue = porCajon(cur);
+            if (nue !== cur) m.target.setAttribute('src', nue);
+          }
+          for (var j = 0; j < m.addedNodes.length; j++) {
+            var n = m.addedNodes[j];
+            if (!n || n.nodeType !== 1) continue;
+            if (n.tagName === 'IMG') { var c = n.getAttribute('src'), x = porCajon(c); if (x !== c) n.setAttribute('src', x); }
+            else barrer(n);
+          }
+        }
+      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { barrer(document); });
+    else barrer(document);
+  } catch (e) { /* si algo falla, las imágenes cargan directo del servidor como siempre */ }
 
   // ── ¿La página se VE oscura? ──
   // Señales, de la más directa a la más física: la clase `dark` (next-themes) y, si no
@@ -750,6 +819,10 @@ fn show_app_menu<R: Runtime>(app: &AppHandle<R>) {
     let Some(win) = main_window(app) else { return };
     let autostart_on = app.autolaunch().is_enabled().unwrap_or(false);
     let version = format!("Versión {}", app.package_info().version);
+    // El cajón dice cuánto ocupa en su propia etiqueta: así vaciarlo es una decisión informada, y
+    // de paso es la comprobación más simple de que el caché está funcionando (el número crece al
+    // navegar fotos y vuelve a 0 al vaciar).
+    let vaciar_txt = format!("Vaciar caché de imágenes ({})", tamano_legible(cache::tamano(app)));
     let build = || -> tauri::Result<Menu<R>> {
         Ok(Menu::with_items(
             app,
@@ -767,6 +840,7 @@ fn show_app_menu<R: Runtime>(app: &AppHandle<R>) {
                 &MenuItem::with_id(app, "zoom-0", "Tamaño real", true, Some("CmdOrCtrl+0"))?,
                 &PredefinedMenuItem::separator(app)?,
                 &MenuItem::with_id(app, "open-browser", "Abrir esta página en el navegador", true, None::<&str>)?,
+                &MenuItem::with_id(app, "clear-cache", &vaciar_txt, true, None::<&str>)?,
                 &CheckMenuItem::with_id(app, "autostart-toggle", "Iniciar con el sistema", true, autostart_on, None::<&str>)?,
                 &MenuItem::with_id(app, "check-update", "Buscar actualización…", true, None::<&str>)?,
                 &PredefinedMenuItem::separator(app)?,
@@ -777,6 +851,24 @@ fn show_app_menu<R: Runtime>(app: &AppHandle<R>) {
     };
     if let Ok(menu) = build() {
         let _ = win.popup_menu(&menu);
+    }
+}
+
+// Bytes → «12 MB» / «340 KB» / «1.2 GB», para la etiqueta del menú.
+fn tamano_legible(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{} MB", bytes / MB)
+    } else if bytes >= KB {
+        format!("{} KB", bytes / KB)
+    } else if bytes == 0 {
+        "vacío".to_string()
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -1004,6 +1096,73 @@ fn field_bool(payload: &str, key: &str) -> Option<bool> {
     serde_json::from_str::<serde_json::Value>(payload).ok()?.get(key)?.as_bool()
 }
 
+// ── Esquema lsthumb:// — el cajón de miniaturas ────────────────────────────────
+// La web app, dentro de la app, pide las miniaturas de la cuadrícula como
+// `lsthumb://c/?u=<URL real del servidor, con su token>`. Aquí se contesta: si está en el cajón,
+// del disco; si no, se trae del NAS UNA vez, se guarda y se sirve. Todo el trabajo de red y disco
+// va en un hilo aparte (ureq es bloqueante) para no congelar el webview.
+//
+// El módulo `cache` pone los cerrojos: `permitido` (solo el servidor y su API, nunca un proxy
+// abierto) y `clave_de` (identidad estable sin el token que rota).
+
+fn respuesta_bytes(bytes: Vec<u8>) -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .status(200)
+        .header("Content-Type", "image/webp")
+        // Privada y de larga vida: quien manda de verdad es el cajón en disco; esto solo evita
+        // que el propio webview volviera a pedirla dentro de la misma sesión.
+        .header("Cache-Control", "private, max-age=86400")
+        .header("Access-Control-Allow-Origin", "*")
+        .body(bytes)
+        .unwrap()
+}
+
+fn respuesta_estado(code: u16) -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .status(code)
+        .header("Access-Control-Allow-Origin", "*")
+        .body(Vec::new())
+        .unwrap()
+}
+
+fn responder_lsthumb<R: Runtime>(
+    ctx: tauri::UriSchemeContext<'_, R>,
+    req: tauri::http::Request<Vec<u8>>,
+    responder: tauri::UriSchemeResponder,
+) {
+    let app = ctx.app_handle().clone();
+    let objetivo = match cache::url_pedida(&req.uri().to_string()) {
+        Some(u) if cache::permitido(&u) => u,
+        _ => {
+            responder.respond(respuesta_estado(400));
+            return;
+        }
+    };
+    let Some(clave) = cache::clave_de(&objetivo) else {
+        responder.respond(respuesta_estado(400));
+        return;
+    };
+
+    // ¿En el cajón? Del disco, sin tocar la red.
+    if let Some(bytes) = cache::leer(&app, &clave) {
+        responder.respond(respuesta_bytes(bytes));
+        return;
+    }
+
+    // Falta: traerla del NAS y guardarla para la próxima. Va en el POOL de hilos de bloqueo (no un
+    // `std::thread::spawn` por petición): al abrir un set de 500 fotos podrían dispararse muchas a
+    // la vez, y el pool las acota y reutiliza sus hilos en vez de crear cientos.
+    tauri::async_runtime::spawn_blocking(move || match cache::traer(&objetivo) {
+        Ok((bytes, es_webp)) => {
+            if es_webp {
+                cache::escribir(&app, &clave, &bytes);
+            }
+            responder.respond(respuesta_bytes(bytes));
+        }
+        Err(code) => responder.respond(respuesta_estado(code)),
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default();
@@ -1021,7 +1180,10 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None));
+        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        // El cajón de miniaturas (ver el módulo `cache` y el handler de arriba). Registrado en el
+        // builder para que TODAS las webviews de pestaña puedan usarlo.
+        .register_asynchronous_uri_scheme_protocol("lsthumb", responder_lsthumb);
 
     let app = builder
         .manage(ShellState::default())
@@ -1193,6 +1355,18 @@ pub fn run() {
                 }
                 id if id.starts_with("tab-color-") => tab_menu_action(app, id),
                 "autostart-toggle" => toggle_autostart(app),
+                "clear-cache" => {
+                    let antes = cache::tamano(app);
+                    cache::vaciar(app);
+                    // Un aviso nativo confirma que se hizo (y cuánto se liberó): sin él, «vaciar»
+                    // no da ninguna señal y parece que no pasó nada.
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("Labstream OS")
+                        .body(format!("Caché de imágenes vaciado ({} liberados).", tamano_legible(antes)))
+                        .show();
+                }
                 "check-update" => {
                     #[cfg(desktop)]
                     tauri::async_runtime::spawn(check_update_manual(app.clone()));
