@@ -102,6 +102,22 @@ struct MenuState<R: Runtime>(Mutex<MenuUi<R>>);
 fn ahora_seg() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
+
+// Segundos desde la última entrada del usuario (teclado/mouse/trackpad), preguntados al
+// subsistema HID de macOS. CGEventSourceSecondsSinceLastEventType es de solo LECTURA y NO
+// exige permiso de Accesibilidad ni de Monitorización de entrada (lo usan el salvapantallas y
+// `ioreg HIDIdleTime`). Con esto el sensor sabe si hubo actividad SIN el diálogo «… quiere
+// controlar este ordenador» que salía al leer el teclado global con device_query.
+#[cfg(target_os = "macos")]
+fn idle_seconds_macos() -> f64 {
+    const HID_SYSTEM_STATE: i32 = 1; // kCGEventSourceStateHIDSystemState
+    const ANY_INPUT_EVENT: u32 = 0xFFFF_FFFF; // kCGAnyInputEventType
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceSecondsSinceLastEventType(state_id: i32, event_type: u32) -> f64;
+    }
+    unsafe { CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, ANY_INPUT_EVENT) }
+}
 fn ahora_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
@@ -427,8 +443,10 @@ pub fn iniciar<R: Runtime>(app: &AppHandle<R>) {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
 
+        #[cfg(not(target_os = "macos"))]
         let device_state = device_query::DeviceState::new();
         let mut ultimo_input = ahora_seg();
+        #[cfg(not(target_os = "macos"))]
         let mut huella_anterior: (i32, i32, usize) = (0, 0, 0);
         let mut acumulado: HashMap<(String, String), Bloque> = HashMap::new();
         let mut ocios_pendientes: Vec<Ocio> = Vec::new();
@@ -504,14 +522,27 @@ pub fn iniciar<R: Runtime>(app: &AppHandle<R>) {
             }
             tic_previo = ahora;
 
-            // ¿Hubo entrada desde el último tic? Solo se compara una huella (posición del
-            // mouse + cuántas teclas hay presionadas): nunca se registra QUÉ se tecleó.
-            use device_query::DeviceQuery;
-            let mouse = device_state.get_mouse();
-            let teclas = device_state.get_keys().len();
-            let huella = (mouse.coords.0, mouse.coords.1, teclas);
-            let hubo_input = huella != huella_anterior || teclas > 0;
-            huella_anterior = huella;
+            // ¿Hubo entrada desde el último tic? Solo interesa el HECHO de que hubo entrada,
+            // nunca QUÉ se tecleó ni dónde.
+            //
+            // macOS: se pregunta al sistema cuántos segundos lleva SIN entrada (HID). Esa API
+            // NO exige permiso de Accesibilidad ni de Monitorización de entrada, así que ya no
+            // aparece el diálogo «… quiere controlar este ordenador». Inactividad < 1 tic =
+            // hubo entrada. Aquí `device_state`/`huella_anterior` no existen.
+            #[cfg(target_os = "macos")]
+            let hubo_input = idle_seconds_macos() < (TICK_SEG as f64) + 1.0;
+            // Windows/Linux: huella de entrada con device_query (posición del mouse + cuántas
+            // teclas hay presionadas). Leer esto ahí no pide permiso especial.
+            #[cfg(not(target_os = "macos"))]
+            let hubo_input = {
+                use device_query::DeviceQuery;
+                let mouse = device_state.get_mouse();
+                let teclas = device_state.get_keys().len();
+                let huella = (mouse.coords.0, mouse.coords.1, teclas);
+                let cambio = huella != huella_anterior || teclas > 0;
+                huella_anterior = huella;
+                cambio
+            };
             if hubo_input {
                 ultimo_input = ahora;
             }

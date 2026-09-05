@@ -34,9 +34,15 @@ serde_json = "1"
 # ureq: subir los lotes a /api/tracker (bloqueante, corre en su propio hilo).
 # gethostname: el nombre del equipo, que bautiza al device en el servidor.
 active-win-pos-rs = "0.11"
-device_query = "4"
 ureq = { version = "2", features = ["json"] }
 gethostname = "0.5"
+
+# device_query solo en Windows/Linux: la huella de entrada (posición del mouse + cuántas teclas
+# hay presionadas). En macOS NO se usa —leer el teclado global dispara el permiso de
+# Accesibilidad y el diálogo «… quiere controlar este ordenador»— y se sustituye por
+# CGEventSourceSecondsSinceLastEventType (idle_seconds_macos en tracker.rs), que no pide permiso.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+device_query = "4"
 
 # ── Excepción del video (Windows) ──
 # Para saber si «hay un video reproduciéndose» sin espiar el navegador: se mira el MEDIDOR de
