@@ -67,6 +67,16 @@ const GOOGLE_HOSTS: &[&str] = &[
     "myaccount.google.com",
 ];
 
+// Cadena de navegador de escritorio. Sin esto, WebView2 se anuncia como control embebido y
+// Google Sheets/Docs se quedan en blanco. Se declara por plataforma porque Google tambien
+// mira la coherencia entre el sistema declarado y el resto de la cadena.
+#[cfg(target_os = "windows")]
+const UA_ESCRITORIO: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+#[cfg(target_os = "macos")]
+const UA_ESCRITORIO: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const UA_ESCRITORIO: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
 fn is_google_host(host: &str) -> bool {
     let h = host.to_ascii_lowercase();
     GOOGLE_HOSTS.iter().any(|d| h == *d || h.ends_with(&format!(".{}", d)))
@@ -603,6 +613,7 @@ fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: boo
     let init = INIT_JS_TPL.replace("__LABEL__", &label).replace("__ORIGIN__", SERVER_URL);
     let app_zoom = app.clone();
     let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed))
+        .user_agent(UA_ESCRITORIO)
         .initialization_script(&init)
         // Deja pasar las descargas (entregables, exportaciones) Y avisa al terminar.
         // El aviso no es un adorno: en WebView2 la interfaz de descargas queda SIEMPRE
