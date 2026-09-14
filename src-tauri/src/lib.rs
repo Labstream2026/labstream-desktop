@@ -52,6 +52,34 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_opener::OpenerExt;
 
 const SERVER_URL: &str = "https://os.labstreamsas.com";
+
+// Los documentos del contador viven en Google (pestaña Contable). Se abren como PESTANAS
+// de esta app, no en el navegador externo: asi el WebView guarda la sesion de Google del
+// usuario (cookies persistentes) y no hay que iniciar sesion cada vez. La lista es cerrada
+// a proposito: solo hosts propios de Google (docs/drive/sheets y accounts para el login).
+// Todo lo demas sigue yendo al navegador del sistema.
+const GOOGLE_HOSTS: &[&str] = &[
+    "docs.google.com",
+    "drive.google.com",
+    "sheets.google.com",
+    "accounts.google.com",
+    "myaccount.google.com",
+];
+
+fn is_google_host(host: &str) -> bool {
+    let h = host.to_ascii_lowercase();
+    GOOGLE_HOSTS.iter().any(|d| h == *d || h.ends_with(&format!(".{}", d)))
+}
+
+fn es_pestana_interna(target: &Url, server: &Url) -> bool {
+    if target.origin() == server.origin() {
+        return true;
+    }
+    if target.scheme() != "https" {
+        return false;
+    }
+    target.host_str().map(is_google_host).unwrap_or(false)
+}
 const TAB_BAR_H: f64 = 40.0; // alto lógico de la barra de pestañas (chrome)
 const CHROME: &str = "chrome";
 // Hueco que ocupan los botones rojo/amarillo/verde en macOS: la barra deja libre ese
@@ -204,7 +232,12 @@ const INIT_JS_TPL: &str = r#"
   // descargar fallaban solo en la app de Windows, y no en Mac ni en el navegador.
   // En macOS estas dos líneas son un no-op: allí el script nunca ha corrido en subframes.
   try { if (window.top !== window.self) return; } catch (e) { return; }
-  if (location.origin !== ORIGIN) return; // p. ej. el login del SSO: no intervenir
+  // Hosts de Google que la app abre como pestana propia (pestana Contable). En esas
+  // paginas solo reportamos titulo a la barra; NO tocamos clics ni window.open para no
+  // romper el editor de Google.
+  var GOOGLE_RE = /^(?:.*\.)?(?:docs|drive|sheets|accounts|myaccount)\.google\.com$/i;
+  var esGoogle = GOOGLE_RE.test(location.hostname);
+  if (location.origin !== ORIGIN && !esGoogle) return;
 
   if (window.__lsShell) return;
   window.__lsShell = true;
@@ -215,7 +248,9 @@ const INIT_JS_TPL: &str = r#"
   function abs(h) { try { return new URL(h, location.href); } catch (e) { return null; } }
   function isHttp(u) { return !!u && (u.protocol === 'http:' || u.protocol === 'https:'); }
   function isApp(u) { return isHttp(u) && u.origin === ORIGIN; }
-  function isExt(u) { return isHttp(u) && u.origin !== ORIGIN; }
+  function isGoogleUrl(u) { return isHttp(u) && GOOGLE_RE.test(u.hostname); }
+  function isInterno(u) { return isApp(u) || isGoogleUrl(u); }
+  function isExt(u) { return isHttp(u) && !isInterno(u); }
   function emit(name, payload) { try { T.event.emit(name, payload); } catch (e) {} }
   function openExternal(url) {
     try { T.core.invoke('plugin:opener|open_url', { url: url, with: null }); }
@@ -274,6 +309,7 @@ const INIT_JS_TPL: &str = r#"
     history[k] = function () { var r = o.apply(this, arguments); setTimeout(report, 0); return r; };
   });
   addEventListener('popstate', function () { setTimeout(report, 0); });
+  if (esGoogle) return; // en Google solo miramos el titulo
   // Pulsar la luna cambia clases/estilos sin navegar: se vigilan <html> y <body> (cuando
   // existan — a document-start aún no hay), y tras la carga se re-reporta un par de veces
   // por si el tema aterriza tarde con la hidratación.
@@ -296,6 +332,9 @@ const INIT_JS_TPL: &str = r#"
     if (!u) return;
     if (isExt(u)) { e.preventDefault(); openExternal(u.href); return; }
     var mod = e.metaKey || e.ctrlKey;
+    // Enlace a Google (docs, drive, sheets, accounts): SIEMPRE como pestana propia
+    // aunque no lleve target=_blank, para que la sesion viva dentro de la app.
+    if (isGoogleUrl(u)) { e.preventDefault(); newTab(u.href); return; }
     if (isApp(u) && (mod || a.target === '_blank')) { e.preventDefault(); newTab(u.href); }
   }, true);
 
@@ -306,14 +345,14 @@ const INIT_JS_TPL: &str = r#"
     if (!a) return;
     var u = abs(a.getAttribute('href'));
     if (isExt(u)) { e.preventDefault(); openExternal(u.href); return; }
-    if (isApp(u)) { e.preventDefault(); newTab(u.href); }
+    if (isInterno(u)) { e.preventDefault(); newTab(u.href); }
   }, true);
 
   var _open = window.open;
   window.open = function (url, name, feats) {
     var u = url ? abs(url) : null;
     if (isExt(u)) { openExternal(u.href); return null; }
-    if (isApp(u)) { newTab(u.href); return null; }
+    if (isInterno(u)) { newTab(u.href); return null; }
     return _open ? _open.call(window, url, name, feats) : null;
   };
 
@@ -475,7 +514,7 @@ fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: boo
     // Solo el origen de la app puede abrirse en pestaña; cualquier otra cosa va al navegador.
     let Ok(parsed) = Url::parse(&target) else { return };
     let Ok(server) = Url::parse(SERVER_URL) else { return };
-    if parsed.origin() != server.origin() {
+    if !es_pestana_interna(&parsed, &server) {
         return;
     }
 
@@ -1226,7 +1265,7 @@ pub fn run() {
                     .tabs
                     .iter()
                     .enumerate()
-                    .filter(|(_, u)| Url::parse(u).map(|p| p.origin() == server.origin()).unwrap_or(false))
+                    .filter(|(_, u)| Url::parse(u).map(|p| es_pestana_interna(&p, &server)).unwrap_or(false))
                     .take(12)
                     .map(|(i, u)| (u.clone(), saved.colors.get(i).cloned().unwrap_or_default()))
                     .collect()
