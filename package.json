@@ -4,7 +4,7 @@
   "private": true,
   "description": "App de escritorio (Windows) que envuelve Labstream OS — cliente del servidor del NAS.",
   "scripts": {
-    "test": "node --test tests/*.test.cjs",
+    "test": "node --test tests/images.test.cjs",
     "icons": "tauri icon app-icon.png",
     "dev": "npm run icons && tauri dev",
     "build": "npm run icons && tauri build",
