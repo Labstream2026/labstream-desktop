@@ -54,11 +54,7 @@ use tauri_plugin_opener::OpenerExt;
 
 const SERVER_URL: &str = "https://os.labstreamsas.com";
 
-// Los documentos del contador viven en Google (pestaña Contable). Se abren como PESTANAS
-// de esta app, no en el navegador externo: asi el WebView guarda la sesion de Google del
-// usuario (cookies persistentes) y no hay que iniciar sesion cada vez. La lista es cerrada
-// a proposito: solo hosts propios de Google (docs/drive/sheets y accounts para el login).
-// Todo lo demas sigue yendo al navegador del sistema.
+// Google requiere el navegador del sistema para autenticar y editar con compatibilidad completa.
 const GOOGLE_HOSTS: &[&str] = &[
     "docs.google.com",
     "drive.google.com",
@@ -67,29 +63,29 @@ const GOOGLE_HOSTS: &[&str] = &[
     "myaccount.google.com",
 ];
 
-// Cadena de navegador de escritorio. Sin esto, WebView2 se anuncia como control embebido y
-// Google Sheets/Docs se quedan en blanco. Se declara por plataforma porque Google tambien
-// mira la coherencia entre el sistema declarado y el resto de la cadena.
-#[cfg(target_os = "windows")]
-const UA_ESCRITORIO: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-#[cfg(target_os = "macos")]
-const UA_ESCRITORIO: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-const UA_ESCRITORIO: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-
 fn is_google_host(host: &str) -> bool {
     let h = host.to_ascii_lowercase();
     GOOGLE_HOSTS.iter().any(|d| h == *d || h.ends_with(&format!(".{}", d)))
 }
 
 fn es_pestana_interna(target: &Url, server: &Url) -> bool {
-    if target.origin() == server.origin() {
-        return true;
+    target.origin() == server.origin()
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::*;
+
+    #[test]
+    fn only_labstream_is_an_embedded_tab() {
+        let server = Url::parse(SERVER_URL).unwrap();
+        assert!(es_pestana_interna(&server.join("/revisiones/1").unwrap(), &server));
+        for url in ["https://docs.google.com/document/d/1/edit", "https://accounts.google.com", "https://os.labstreamsas.com.evil.example", "http://os.labstreamsas.com"] {
+            assert!(!es_pestana_interna(&Url::parse(url).unwrap(), &server));
+        }
+        assert!(is_google_host("docs.google.com"));
+        assert!(!is_google_host("docs.google.com.evil.example"));
     }
-    if target.scheme() != "https" {
-        return false;
-    }
-    target.host_str().map(is_google_host).unwrap_or(false)
 }
 const TAB_BAR_H: f64 = 40.0; // alto lógico de la barra de pestañas (chrome)
 const CHROME: &str = "chrome";
@@ -243,12 +239,7 @@ const INIT_JS_TPL: &str = r#"
   // descargar fallaban solo en la app de Windows, y no en Mac ni en el navegador.
   // En macOS estas dos líneas son un no-op: allí el script nunca ha corrido en subframes.
   try { if (window.top !== window.self) return; } catch (e) { return; }
-  // Hosts de Google que la app abre como pestana propia (pestana Contable). En esas
-  // paginas solo reportamos titulo a la barra; NO tocamos clics ni window.open para no
-  // romper el editor de Google.
-  var GOOGLE_RE = /^(?:.*\.)?(?:docs|drive|sheets|accounts|myaccount)\.google\.com$/i;
-  var esGoogle = GOOGLE_RE.test(location.hostname);
-  if (location.origin !== ORIGIN && !esGoogle) return;
+  if (location.origin !== ORIGIN) return;
 
   if (window.__lsShell) return;
   window.__lsShell = true;
@@ -259,8 +250,7 @@ const INIT_JS_TPL: &str = r#"
   function abs(h) { try { return new URL(h, location.href); } catch (e) { return null; } }
   function isHttp(u) { return !!u && (u.protocol === 'http:' || u.protocol === 'https:'); }
   function isApp(u) { return isHttp(u) && u.origin === ORIGIN; }
-  function isGoogleUrl(u) { return isHttp(u) && GOOGLE_RE.test(u.hostname); }
-  function isInterno(u) { return isApp(u) || isGoogleUrl(u); }
+  function isInterno(u) { return isApp(u); }
   function isExt(u) { return isHttp(u) && !isInterno(u); }
   function emit(name, payload) { try { T.event.emit(name, payload); } catch (e) {} }
   function openExternal(url) {
@@ -269,73 +259,10 @@ const INIT_JS_TPL: &str = r#"
   }
   function newTab(url) { emit('ls-new-tab', { url: url }); }
 
-  // ── Miniaturas por el CAJÓN de la app (lsthumb://) ──
-  // Dentro de la app de escritorio, las miniaturas de la cuadrícula de fotos se piden por el
-  // esquema lsthumb:// en vez de directo al servidor. Así las sirve el cajón local (Rust): del
-  // disco si ya están —sobreviven a cerrar la app, que es lo que se pedía— y del NAS solo la
-  // primera vez. Fuera de la app (navegador normal) este script no corre y todo sigue igual.
-  //
-  // Se reescribe SOLO la miniatura de 480 px (thumb=1): es la que se repite 500 veces por set y
-  // ahoga la cuadrícula. El visor grande (thumb=xl) y la anotación sobre lienzo NO se tocan —
-  // cargar la imagen del lienzo por otro esquema lo «ensuciaría» y rompería «guardar el dibujo».
-  try {
-    function porCajon(src) {
-      if (!src || src.lastIndexOf('lsthumb:', 0) === 0) return src; // ya reescrita
-      var u = abs(src);
-      if (!u || u.origin !== ORIGIN) return src;                    // solo lo del propio servidor
-      if (!/\/api\/files-asset\//.test(u.pathname) || u.searchParams.get('thumb') !== '1') return src;
-      return 'lsthumb://c/?u=' + encodeURIComponent(u.href);
-    }
-    var proto = HTMLImageElement.prototype;
-    // 1) La propiedad .src (lo que usa React al asignar la imagen).
-    var d = Object.getOwnPropertyDescriptor(proto, 'src');
-    if (d && d.get && d.set) {
-      Object.defineProperty(proto, 'src', {
-        configurable: true, enumerable: d.enumerable,
-        get: function () { return d.get.call(this); },
-        set: function (v) { d.set.call(this, porCajon(String(v))); },
-      });
-    }
-    // 2) setAttribute('src', …), que no pasa por el setter de la propiedad. Se parchea SOLO en
-    //    <img> (prototipo de HTMLImageElement), no en todos los elementos.
-    var setA = proto.setAttribute;
-    proto.setAttribute = function (name, value) {
-      if (arguments.length >= 2 && String(name).toLowerCase() === 'src') {
-        return setA.call(this, name, porCajon(String(value)));
-      }
-      return setA.apply(this, arguments);
-    };
-    // 3) Las que ya vienen en el HTML del servidor (SSR) o llegan luego. porCajon es idempotente
-    //    (una ya reescrita se devuelve igual), así que barrer no entra en bucle con el observer.
-    function barrer(raiz) {
-      if (!raiz || !raiz.querySelectorAll) return;
-      var imgs = raiz.querySelectorAll('img[src]');
-      for (var i = 0; i < imgs.length; i++) {
-        var cur = imgs[i].getAttribute('src');
-        var nue = porCajon(cur);
-        if (nue !== cur) imgs[i].setAttribute('src', nue);
-      }
-    }
-    if (window.MutationObserver) {
-      new MutationObserver(function (muts) {
-        for (var i = 0; i < muts.length; i++) {
-          var m = muts[i];
-          if (m.type === 'attributes' && m.target && m.target.tagName === 'IMG') {
-            var cur = m.target.getAttribute('src'), nue = porCajon(cur);
-            if (nue !== cur) m.target.setAttribute('src', nue);
-          }
-          for (var j = 0; j < m.addedNodes.length; j++) {
-            var n = m.addedNodes[j];
-            if (!n || n.nodeType !== 1) continue;
-            if (n.tagName === 'IMG') { var c = n.getAttribute('src'), x = porCajon(c); if (x !== c) n.setAttribute('src', x); }
-            else barrer(n);
-          }
-        }
-      }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
-    }
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { barrer(document); });
-    else barrer(document);
-  } catch (e) { /* si algo falla, las imágenes cargan directo del servidor como siempre */ }
+  // Las imagenes conservan su URL HTTPS y la sesion del webview. El descargador
+  // lsthumb no comparte cookies: falla con miniaturas sin token y omite la
+  // revalidacion de permisos al leer del disco. La cache HTTP respeta los ETag
+  // y Cache-Control del servidor sin modificar src, srcset ni la hidratacion.
 
   // ── ¿La página se VE oscura? ──
   // Señales, de la más directa a la más física: la clase `dark` (next-themes) y, si no
@@ -388,7 +315,6 @@ const INIT_JS_TPL: &str = r#"
     history[k] = function () { var r = o.apply(this, arguments); setTimeout(report, 0); return r; };
   });
   addEventListener('popstate', function () { setTimeout(report, 0); });
-  if (esGoogle) return; // en Google solo miramos el titulo
   // Pulsar la luna cambia clases/estilos sin navegar: se vigilan <html> y <body> (cuando
   // existan — a document-start aún no hay), y tras la carga se re-reporta un par de veces
   // por si el tema aterriza tarde con la hidratación.
@@ -411,9 +337,6 @@ const INIT_JS_TPL: &str = r#"
     if (!u) return;
     if (isExt(u)) { e.preventDefault(); openExternal(u.href); return; }
     var mod = e.metaKey || e.ctrlKey;
-    // Enlace a Google (docs, drive, sheets, accounts): SIEMPRE como pestana propia
-    // aunque no lleve target=_blank, para que la sesion viva dentro de la app.
-    if (isGoogleUrl(u)) { e.preventDefault(); newTab(u.href); return; }
     if (isApp(u) && (mod || a.target === '_blank')) { e.preventDefault(); newTab(u.href); }
   }, true);
 
@@ -612,9 +535,16 @@ fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: boo
 
     let init = INIT_JS_TPL.replace("__LABEL__", &label).replace("__ORIGIN__", SERVER_URL);
     let app_zoom = app.clone();
+    let app_navigation = app.clone();
     let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed))
-        .user_agent(UA_ESCRITORIO)
         .initialization_script(&init)
+        .on_navigation(move |url| {
+            if url.scheme() == "https" && url.host_str().map(is_google_host).unwrap_or(false) {
+                let _ = app_navigation.opener().open_url(url.as_str(), None::<&str>);
+                return false;
+            }
+            true
+        })
         // Deja pasar las descargas (entregables, exportaciones) Y avisa al terminar.
         // El aviso no es un adorno: en WebView2 la interfaz de descargas queda SIEMPRE
         // apagada. wry trae un manejador de descargas por defecto (wry-0.55.1/src/lib.rs:830),

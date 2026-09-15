@@ -44,6 +44,9 @@ jobs:
       - name: Instalar dependencias
         run: npm install
 
+      - name: Probar el script del cliente
+        run: npm test
+
       # build.rs de Tauri valida que existan los iconos que declara tauri.conf.json.
       - name: Generar iconos (desde app-icon.png)
         run: npm run icons
