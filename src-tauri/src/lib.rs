@@ -23,6 +23,8 @@
 //   - Globo de NO-LEÍDOS en el icono (evento `ls-badge` desde la web app): número en el
 //     Dock (macOS), punto rojo en la barra de tareas (Windows) y tooltip de la bandeja.
 //   - ZOOM de interfaz (Cmd/Ctrl +/−/0 y Ctrl+rueda) con persistencia entre sesiones.
+//   - DESCARGAS con «Guardar como»: el sistema pregunta dónde guardar cada archivo (con el
+//     nombre que sugiere el servidor) en vez de dejarlo caer en silencio en Descargas.
 //   - Sesión restaurada: al reabrir vuelve con las mismas pestañas y tamaño de ventana.
 //   - single-instance (solo release): abrir la app de nuevo enfoca la ventana existente.
 //   - macOS: clic en el Dock reabre la ventana oculta (RunEvent::Reopen) y menú nativo con
@@ -35,7 +37,11 @@
 mod cache;
 mod tracker;
 
-use std::sync::Mutex;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -147,6 +153,15 @@ impl Default for Shell {
 }
 
 type ShellState = Mutex<Shell>;
+
+// Rutas elegidas en «Guardar como» de las descargas EN CURSO, por URL de origen. Hace falta para
+// nombrar el archivo al terminar: en macOS `DownloadEvent::Finished` llega SIEMPRE con
+// `path: None` (wry-0.55.1/src/wkwebview/download.rs:98-99 pasa `None` a mano), así que la única
+// forma de decir «Descargado: informe.xlsx» es recordar aquí lo que el usuario eligió. La URL es
+// la misma en Requested y en Finished en ambos motores (DownloadOperation.Uri en WebView2;
+// originalRequest.URL en WKDownload).
+#[derive(Default)]
+struct Descargas(Mutex<HashMap<String, PathBuf>>);
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 struct WinRect {
@@ -510,6 +525,99 @@ fn activate_tab<R: Runtime>(app: &AppHandle<R>, label: &str) {
     save_persisted(app);
 }
 
+// ── Descargas: «Guardar como» ──
+//
+// tauri::webview::DownloadEvent avisa DOS veces por descarga:
+//   - Requested { url, destination: &mut PathBuf }: antes de empezar. `destination` trae la ruta
+//     que el motor usaría por defecto (carpeta Descargas + nombre sugerido) y se puede
+//     SOBRESCRIBIR (ruta absoluta); devolver false cancela la descarga.
+//   - Finished { url, path: Option<PathBuf>, success }: al terminar, bien o mal.
+//
+// Cómo llega `destination` según el motor:
+//   - Windows (WebView2): ICoreWebView2DownloadStartingEventArgs::ResultFilePath, que ya lleva el
+//     nombre del Content-Disposition (o del último segmento de la URL) y « (1)», « (2)»… si el
+//     archivo ya existe en Descargas. Si devolvemos true, wry hace SetResultFilePath(destination)
+//     + SetHandled(true) (wry-0.55.1/src/webview2/mod.rs:849-864); si false, SetCancel(true).
+//   - macOS (WKWebView): wry compone ~/Downloads/<suggestedFilename de WebKit> con el mismo
+//     esquema de « (n)» y, si devolvemos true, entrega esa ruta al completion handler de
+//     WKDownload como destino (wry-0.55.1/src/wkwebview/download.rs:49-91). El nombre viene
+//     siempre relleno. LÍMITE: WKWebView solo trata como descarga (a) los enlaces con atributo
+//     `download` (shouldPerformDownload) y (b) las respuestas cuyo MIME no sabe mostrar
+//     (canShowMIMEType == false; wkwebview/navigation.rs:59-73 y 93-100). WebKit NO mira
+//     Content-Disposition al decidir (WebPage::canShowResponse consulta solo el MIME), así que un
+//     PDF o una imagen servidos como attachment se MUESTRAN en la pestaña en vez de bajar; un
+//     .xlsx/.docx/.zip sí dispara la descarga porque WebKit no los renderiza.
+
+// Abre el «Guardar como» nativo y deja en `destination` la ruta elegida. Devuelve false (y wry
+// cancela la descarga) si el usuario cierra el diálogo; en ese caso no se avisa de nada.
+//
+// El diálogo es SÍNCRONO a propósito: el manejador de wry tiene que responder antes de volver y
+// en el mismo hilo (el principal, donde WebView2 y WKWebView despachan estos eventos; wry no
+// expone el deferral de WebView2). Por eso va rfd::FileDialog directo y no tauri-plugin-dialog:
+// su `blocking_save_file()` monta un rfd::AsyncFileDialog y espera en un canal (macro
+// blocking_fn en plugins/dialog/src/lib.rs); en macOS ese diálogo asíncrono se presenta como
+// hoja sobre la ventana principal (beginSheetModalForWindow) y solo se muestra y resuelve si el
+// run loop principal gira (rfd/src/backend/macos/modal_future.rs:79-102)… que es justo el hilo
+// que estaría parado en recv() → cuelgue. rfd::FileDialog::save_file corre un bucle modal
+// anidado en el propio hilo (NSSavePanel.runModal / IFileDialog::Show), que es lo que hace
+// falta aquí. La ventana va como padre para que en Windows el diálogo sea modal a la app y no
+// se quede detrás. No se fuerza carpeta inicial: el sistema recuerda la última usada.
+fn pedir_destino_descarga<R: Runtime>(webview: &Webview<R>, url: &Url, destination: &mut PathBuf) -> bool {
+    let ventana = webview.window();
+    let dialogo = rfd::FileDialog::new()
+        .set_title("Guardar como")
+        .set_file_name(nombre_sugerido(url, destination))
+        .set_parent(&ventana);
+    match dialogo.save_file() {
+        Some(ruta) => {
+            webview.state::<Descargas>().0.lock().unwrap().insert(url.to_string(), ruta.clone());
+            *destination = ruta;
+            true
+        }
+        None => false,
+    }
+}
+
+// Nombre que propone el diálogo: el que trae `destination` (WebView2 lo saca del
+// Content-Disposition que manda el servidor; en macOS wry lo toma del suggestedFilename de
+// WebKit) y, si viniera vacío, el último segmento de la URL decodificado. Nunca vacío.
+fn nombre_sugerido(url: &Url, destination: &Path) -> String {
+    let del_motor = destination
+        .file_name()
+        .map(|n| n.to_string_lossy().trim().to_string())
+        .filter(|n| !n.is_empty());
+    if let Some(n) = del_motor {
+        return n;
+    }
+    url.path_segments()
+        .and_then(|segs| segs.rev().find(|s| !s.is_empty()))
+        .map(|s| percent_encoding::percent_decode_str(s).decode_utf8_lossy().trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "descarga".to_string())
+}
+
+// Notificación nativa al terminar la descarga. En Windows `path` es la ruta final real (puede
+// diferir de la elegida si el motor tuvo que renombrar); en macOS llega None y se usa la ruta
+// que el usuario eligió en el diálogo (ver `Descargas`).
+fn avisar_descarga_terminada<R: Runtime>(webview: &Webview<R>, url: &Url, path: Option<PathBuf>, success: bool) {
+    let elegida = webview.state::<Descargas>().0.lock().unwrap().remove(url.as_str());
+    let cuerpo = if !success {
+        "No se pudo completar la descarga.".to_string()
+    } else {
+        match path.or(elegida).as_deref().and_then(Path::file_name) {
+            Some(n) => format!("Descargado: {}", n.to_string_lossy()),
+            None => "Descarga terminada.".to_string(),
+        }
+    };
+    let _ = webview
+        .app_handle()
+        .notification()
+        .builder()
+        .title("Labstream OS")
+        .body(cuerpo)
+        .show();
+}
+
 // Crea una pestaña nueva cargando `url` (o el servidor si viene vacío).
 fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: bool) {
     let target = url.unwrap_or_else(|| SERVER_URL.to_string());
@@ -545,7 +653,9 @@ fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: boo
             }
             true
         })
-        // Deja pasar las descargas (entregables, exportaciones) Y avisa al terminar.
+        // Descargas (entregables, exportaciones, enlaces `?download=1`): antes de empezar se
+        // PREGUNTA dónde guardar con el «Guardar como» nativo (ver pedir_destino_descarga) y al
+        // terminar se avisa con una notificación (ver avisar_descarga_terminada).
         // El aviso no es un adorno: en WebView2 la interfaz de descargas queda SIEMPRE
         // apagada. wry trae un manejador de descargas por defecto (wry-0.55.1/src/lib.rs:830),
         // asi que DownloadStarting se registra siempre y siempre responde SetHandled(true)
@@ -553,30 +663,14 @@ fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: boo
         // se encarga la app: ni barra de progreso, ni globo de «descarga terminada». El
         // archivo bajaba bien a la carpeta de Descargas, pero NADA lo decia y parecia roto.
         // Quitar este manejador NO devuelve la interfaz nativa: el de wry sigue puesto.
-        .on_download(|webview, event| {
-            if let DownloadEvent::Finished { path, success, .. } = &event {
-                let cuerpo = if !*success {
-                    "No se pudo completar la descarga.".to_string()
-                } else if let Some(p) = path {
-                    // En macOS `path` llega siempre vacio (limite de WKDownload:
-                    // wry-0.55.1/src/wkwebview/download.rs:98), asi que en la practica
-                    // este brazo con nombre de archivo es el de Windows.
-                    match p.file_name() {
-                        Some(n) => format!("Descargado: {}", n.to_string_lossy()),
-                        None => "Descarga terminada.".to_string(),
-                    }
-                } else {
-                    "Descarga terminada. Esta en tu carpeta de Descargas.".to_string()
-                };
-                let _ = webview
-                    .app_handle()
-                    .notification()
-                    .builder()
-                    .title("Labstream OS")
-                    .body(cuerpo)
-                    .show();
+        .on_download(|webview, event| match event {
+            DownloadEvent::Requested { url, destination } => pedir_destino_descarga(&webview, &url, destination),
+            DownloadEvent::Finished { url, path, success, .. } => {
+                avisar_descarga_terminada(&webview, &url, path, success);
+                true
             }
-            true
+            // El enum es #[non_exhaustive]: si wry añade eventos, dejarlos pasar.
+            _ => true,
         })
         // El zoom guardado se re-aplica en cada carga (el factor no siempre sobrevive a la navegación).
         .on_page_load(move |wv, payload| {
@@ -1167,6 +1261,7 @@ pub fn run() {
 
     let app = builder
         .manage(ShellState::default())
+        .manage(Descargas::default())
         .setup(|app| {
             let handle = app.handle().clone();
             let saved = load_persisted(&handle);
