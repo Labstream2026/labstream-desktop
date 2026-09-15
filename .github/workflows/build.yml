@@ -51,6 +51,9 @@ jobs:
       - name: Generar iconos (desde app-icon.png)
         run: npm run icons
 
+      - name: Probar el cliente
+        run: npm test
+
       - name: Construir, firmar y publicar
         uses: tauri-apps/tauri-action@v0
         env:
@@ -63,6 +66,18 @@ jobs:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
           releaseName: "Labstream OS Desktop __VERSION__"
           releaseBody: "Instaladores de escritorio de Labstream OS.\n\n- Windows: el archivo `.exe` (NSIS).\n- macOS: el archivo `.dmg` universal (Intel + Apple Silicon).\n\nActualización automática activada: las apps ya instaladas se actualizan solas al publicar una versión nueva."
-          releaseDraft: false
+          releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+  activar:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publicar solo cuando ambos instaladores estan completos
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          gh release edit "v$VERSION" --draft=false --latest

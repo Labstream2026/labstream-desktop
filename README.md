@@ -84,6 +84,28 @@ pestañas son webviews hijos `tab-*`. Shell ↔ Rust se hablan por eventos `ls-*
 
 El servidor objetivo se configura en `src-tauri/src/lib.rs` → constante `SERVER_URL`.
 
+### Portadas autenticadas (1.14.1)
+
+Las imagenes conservan su URL HTTPS y se cargan con la sesion del webview, igual
+que en el navegador. Ya no se reescriben a `lsthumb://`: el descargador Rust no
+comparte las cookies y fallaba con miniaturas sin token o con token vencido.
+Tampoco se modifica el DOM de las imagenes durante la hidratacion.
+
+Se usa la cache HTTP con los ETag y Cache-Control del servidor. Una respuesta
+304 reutiliza los bytes descargados; no implica fabricar otro fotograma. El
+cajon antiguo no se borra, pero no se usa para las nuevas peticiones de imagenes.
+No cambia el almacenamiento de originales, la cache HLS de LabTem ni los datos offline.
+
+Google Docs, Sheets, Drive y el inicio de sesion de Google se abren en el navegador
+del sistema. Google no admite OAuth en webviews controlados por una app; ademas,
+WKWebView no debe anunciarse como Chrome. Se conserva el agente de usuario nativo
+y no se borran cookies ni sesiones. Las hojas conectadas siguen disponibles como
+tabla dentro del area contable. Al reiniciar se restauran solo pestanas de Labstream.
+
+Pruebas: `npm test`; con Playwright disponible en Node,
+`node tests/images.browser.cjs` verifica sesion, 304, carga dinamica y lienzo.
+La prueba de navegador usa un servidor local y una cookie ficticia, sin datos reales.
+
 Salidas:
 
 - **Windows** → instalador `.exe` (NSIS).
