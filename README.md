@@ -229,20 +229,72 @@ Es la forma de mirar un cambio visual —la barra, los colores— sin sacárselo
 
 ---
 
-## Avisos de seguridad del sistema (instalación interna sin firmar)
+## Firma de macOS
 
-Como los instaladores **no están firmados** con certificado de pago, la primera
-vez cada sistema muestra una advertencia. Es normal para apps internas:
+### Lo que pasaba hasta la 1.15.0
 
-- **Windows (SmartScreen):** pantalla azul *"Windows protegió su PC"* →
-  **Más información → Ejecutar de todos modos**.
-- **macOS (Gatekeeper):** *"no se puede abrir porque proviene de un desarrollador
-  no identificado"* → clic derecho sobre la app → **Abrir** → **Abrir**. (Si
-  insiste, ejecutar una vez: `xattr -cr "/Applications/Labstream OS.app"`.)
+El build **no firmaba** la app de macOS. No se le pasaba ninguna identidad, así que
+el bundler de Tauri se saltaba `codesign` entero y el `.dmg` salía con la firma ad hoc
+que deja el enlazador. En la app instalada se veía así:
 
-Si en el futuro se distribuye a clientes externos, conviene firmar:
-*code signing* en Windows (~150–400 USD/año) y un *Apple Developer ID* + notarizado
-en Mac (99 USD/año) para quitar estos avisos.
+```
+$ codesign -dv "/Applications/Labstream OS.app"
+Identifier=labstream_desktop-0a5819ba37119701
+CodeDirectory ... flags=0x20002(adhoc,linker-signed)
+Info.plist=not bound
+Sealed Resources=none
+TeamIdentifier=not set
+```
+
+Tres cosas mal, y ninguna avisaba:
+
+- **`Entitlements.plist` no se aplicaba.** Los permisos de micrófono, cámara y JIT
+  eran decoración: se escriben al firmar, y no se firmaba.
+- **`Info.plist=not bound` y `Sealed Resources=none`.** Ni el Info.plist ni los
+  recursos iban dentro de la firma: cualquiera podía cambiarlos sin romperla.
+- **Identificador de enlazador** (`labstream_desktop-<hash>`) en vez del de la app
+  (`co.labstream.os`), que es por lo que macOS recuerda los permisos concedidos.
+
+### Lo que hace ahora (desde la 1.16.0)
+
+`build.yml` decide según los secrets que haya en el repo:
+
+| Secrets | Resultado |
+| --- | --- |
+| ninguno | Firma **ad hoc** (`-s -`) con hardened runtime y los entitlements. Gatekeeper sigue avisando, pero el bundle va sellado y los permisos se aplican. |
+| `APPLE_CERTIFICATE` + `APPLE_CERTIFICATE_PASSWORD` | Firma real con **Developer ID**. Gatekeeper deja de avisar en cualquier Mac. |
+| …y además `APPLE_ID` + `APPLE_PASSWORD` + `APPLE_TEAM_ID` | Firma real + **notarizado y grapado**. Ni el primer arranque avisa. |
+
+Y hay un paso que **tumba la publicación** si los entitlements no llegaron al `.app`.
+Ese paso es la lección: que esto estuviera roto no lo dijo nada durante meses.
+
+### Pasar a Developer ID (99 USD/año)
+
+1. Alta en el Apple Developer Program.
+2. En *Certificates* crear uno de tipo **Developer ID Application** y exportarlo del
+   Llavero como `.p12` con contraseña.
+3. Convertirlo a texto: `base64 -i certificado.p12 | pbcopy`.
+4. En GitHub → *Settings ▸ Secrets and variables ▸ Actions*, añadir:
+   - `APPLE_CERTIFICATE` — lo que quedó en el portapapeles.
+   - `APPLE_CERTIFICATE_PASSWORD` — la contraseña del `.p12`.
+   - `APPLE_SIGNING_IDENTITY` — opcional; por defecto `Developer ID Application`.
+5. Para notarizar, además:
+   - `APPLE_ID` — el correo de la cuenta de desarrollador.
+   - `APPLE_PASSWORD` — una **contraseña específica de app** (appleid.apple.com, no la
+     del Apple ID).
+   - `APPLE_TEAM_ID` — el identificador de equipo de 10 caracteres.
+
+No hay que tocar ni un archivo: en cuanto los secrets existan, la siguiente etiqueta
+sale firmada.
+
+### Mientras siga ad hoc
+
+- **macOS (Gatekeeper):** *"no se puede abrir porque proviene de un desarrollador no
+  identificado"* → clic derecho sobre la app → **Abrir** → **Abrir**. (Si insiste:
+  `xattr -cr "/Applications/Labstream OS.app"`.)
+- **Windows (SmartScreen):** *"Windows protegió su PC"* → **Más información →
+  Ejecutar de todos modos**. Windows es aparte: su firma cuesta 150–400 USD/año y no
+  la toca nada de lo de arriba.
 
 ---
 
@@ -257,10 +309,10 @@ labstream-desktop/
 │   ├── tauri.conf.json          nombre, versión, iconos, instaladores, entitlements
 │   ├── Cargo.toml               dependencias Rust + versión
 │   ├── Info.plist               textos de permiso (micrófono/cámara) en macOS
-│   ├── Entitlements.plist       entitlements de macOS (audio-input, cámara, red)
+│   ├── Entitlements.plist       entitlements de macOS (micrófono, cámara, JIT)
 │   ├── build.rs
 │   ├── capabilities/default.json
 │   ├── icons/                   se generan desde app-icon.png
 │   └── src/{main.rs,lib.rs}     lib.rs crea la ventana + SERVER_URL + tray
-└── .github/workflows/build.yml  build automático de .exe (Windows) y .dmg (macOS)
+└── .github/workflows/build.yml  build de .exe (Windows) y .dmg (macOS) + firma de macOS
 ```

@@ -1,17 +1,39 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ENTITLEMENTS DE macOS.
+
+  OJO AL ESCRIBIR AQUÍ: nada de dos guiones seguidos dentro de un comentario. XML los prohíbe,
+  y el que lee este archivo NO es plutil (que los deja pasar) sino AMFI, dentro de codesign,
+  que se planta con «Failed to parse entitlements». Por eso abajo las opciones de codesign se
+  nombran sin sus guiones.
+
+  Estas claves solo sirven de algo si la app se FIRMA pasándole este archivo y con el hardened
+  runtime puesto. Hasta el 2026-09-19 no era el caso: el build no firmaba nada y la app salía
+  con la firma ad hoc del enlazador (flags=0x20002 adhoc linker-signed, Info.plist sin atar,
+  recursos sin sellar). O sea, este archivo era decoración. Lo que lo arregla está en
+  .github/workflows/build.yml.
+
+  Son entitlements del HARDENED RUNTIME, no del App Sandbox (esta app no usa sandbox). El
+  hardened runtime cierra por defecto el micrófono, la cámara y la memoria ejecutable; cada
+  clave vuelve a abrir una, y sin ella la función no falla con un error claro: simplemente no
+  hay permiso.
+
+  Se cayó com.apple.security.network.client: esa es exclusiva del App Sandbox y, sin
+  com.apple.security.app-sandbox, no hace absolutamente nada. Si algún día se mete la app en el
+  sandbox, vuelve, junto con las de acceso a archivos que harán falta.
+-->
 <plist version="1.0">
 <dict>
-	<!-- Micrófono: notas de voz del chat (getUserMedia en el webview). -->
+	<!-- Micrófono: notas de voz del chat (getUserMedia en el webview). El texto que ve la
+	     persona al conceder el permiso vive en Info.plist (NSMicrophoneUsageDescription). -->
 	<key>com.apple.security.device.audio-input</key>
 	<true/>
-	<!-- Cámara: adjuntar foto/video en el chat. -->
+	<!-- Cámara: adjuntar foto y video en el chat (NSCameraUsageDescription). -->
 	<key>com.apple.security.device.camera</key>
 	<true/>
-	<!-- Cliente de red (conecta con os.labstreamsas.com). -->
-	<key>com.apple.security.network.client</key>
-	<true/>
-	<!-- Requerido por WKWebView (JIT de JavaScript) bajo hardened runtime. -->
+	<!-- WKWebView compila JavaScript en caliente. Bajo hardened runtime eso es memoria
+	     ejecutable y hay que pedirlo explícitamente. -->
 	<key>com.apple.security.cs.allow-jit</key>
 	<true/>
 </dict>

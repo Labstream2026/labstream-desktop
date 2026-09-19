@@ -54,6 +54,62 @@ jobs:
       - name: Probar el cliente
         run: npm test
 
+      # ── FIRMA DE macOS ──────────────────────────────────────────────────────────────────
+      # Hasta el 2026-09-19 este build NO firmaba la app de macOS: no se le pasaba ninguna
+      # identidad, así que el bundler de Tauri se saltaba `codesign` entero y el .dmg salía con
+      # la firma ad hoc que deja el enlazador. Se veía así en la app instalada:
+      #     flags=0x20002(adhoc,linker-signed) · Info.plist=not bound · Sealed Resources=none
+      # Consecuencias: los entitlements (micrófono, cámara, JIT) NO se aplicaban —el
+      # Entitlements.plist del repo era decoración—, el Info.plist y los recursos no iban
+      # sellados, y la app no se podía notarizar de ninguna manera.
+      #
+      # `APPLE_SIGNING_IDENTITY` decide qué pasa, y por eso se calcula aquí y no en el `env:`
+      # del paso de abajo: un secreto que no existe llega como cadena VACÍA, y Tauri
+      # interpreta `APPLE_CERTIFICATE=""` como «hay certificado» y revienta al importarlo.
+      # Solo se exporta lo que de verdad tiene valor.
+      #
+      #   · CON los secretos de Developer ID → firma real + notarizado + grapado.
+      #   · SIN ellos → identidad "-", que es la firma AD HOC: no engaña a Gatekeeper (habrá
+      #     que seguir abriendo con clic derecho), pero SÍ sella los recursos, ata el
+      #     Info.plist y aplica los entitlements. Estrictamente mejor que no firmar.
+      #
+      # El hardened runtime no se configura: en Tauri v2 `bundle.macOS.hardenedRuntime` ya
+      # viene en true, y es lo que hace que los entitlements signifiquen algo.
+      - name: Preparar la firma de macOS
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PW: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          NOTARIZA_ID: ${{ secrets.APPLE_ID }}
+          NOTARIZA_PW: ${{ secrets.APPLE_PASSWORD }}
+          NOTARIZA_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          # Los valores van por heredoc con delimitador: un base64 largo o con saltos rompería
+          # la forma `CLAVE=valor`. Nada se imprime: los secretos no pasan por el log.
+          exportar() { printf '%s<<__FIN__\n%s\n__FIN__\n' "$1" "$2" >> "$GITHUB_ENV"; }
+          if [ -n "${CERT:-}" ] && [ -n "${CERT_PW:-}" ]; then
+            exportar APPLE_CERTIFICATE "$CERT"
+            exportar APPLE_CERTIFICATE_PASSWORD "$CERT_PW"
+            exportar APPLE_SIGNING_IDENTITY "${IDENTITY:-Developer ID Application}"
+            echo "Firma: Developer ID (certificado del repo)."
+          else
+            exportar APPLE_SIGNING_IDENTITY "-"
+            echo "Firma: AD HOC. Sella recursos y aplica entitlements, pero Gatekeeper seguirá avisando."
+            echo "Para firma de verdad, añade los secrets APPLE_CERTIFICATE y APPLE_CERTIFICATE_PASSWORD."
+          fi
+          # Notarizar solo tiene sentido con Developer ID; las tres claves van juntas o ninguna.
+          if [ -n "${CERT:-}" ] && [ -n "${NOTARIZA_ID:-}" ] && [ -n "${NOTARIZA_PW:-}" ] && [ -n "${NOTARIZA_TEAM:-}" ]; then
+            exportar APPLE_ID "$NOTARIZA_ID"
+            exportar APPLE_PASSWORD "$NOTARIZA_PW"
+            exportar APPLE_TEAM_ID "$NOTARIZA_TEAM"
+            echo "Notarizado: activado."
+          else
+            echo "Notarizado: omitido (faltan APPLE_ID, APPLE_PASSWORD o APPLE_TEAM_ID, o no hay certificado)."
+          fi
+
       - name: Construir, firmar y publicar
         uses: tauri-apps/tauri-action@v0
         env:
@@ -61,6 +117,7 @@ jobs:
           # Firma del updater: la clave privada y su contraseña van como secrets del repo.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Las APPLE_* las puso el paso de arriba en $GITHUB_ENV, solo si tenían valor.
         with:
           # En un tag usa su nombre (v1.0.0); en ejecución manual, deriva vX.Y.Z de la versión.
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
@@ -69,6 +126,35 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      # ── LA RED QUE FALTABA ──────────────────────────────────────────────────────────────
+      # Que el build no firmara la app de macOS no lo dijo nada durante meses: el .dmg salía,
+      # se instalaba y funcionaba. Se descubrió a mano, con `codesign -dv`, persiguiendo otra
+      # cosa. Este paso hace esa comprobación en cada publicación y TUMBA el build si los
+      # entitlements no llegaron: es barato y es el único aviso que habría existido.
+      - name: Comprobar la firma de macOS
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP=$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -name "*.app" | head -1)
+          if [ -z "$APP" ]; then echo "::error::No apareció ningún .app donde se esperaba"; exit 1; fi
+          echo "== $APP =="
+          codesign -dv --verbose=4 "$APP" 2>&1 || true
+          echo "== entitlements =="
+          codesign -d --entitlements - --xml "$APP" 2>/dev/null | plutil -convert xml1 -o - - || true
+          echo "== integridad del bundle =="
+          codesign --verify --strict --verbose=2 "$APP"
+          # Gatekeeper: con firma ad hoc esto SIEMPRE dice «rejected», y es esperado. Se
+          # informa sin tumbar nada; lo que sí es obligatorio es lo de abajo.
+          echo "== Gatekeeper (informativo) =="
+          spctl -a -t exec -vv "$APP" 2>&1 || true
+          echo "== obligatorio: los entitlements tienen que estar =="
+          if ! codesign -d --entitlements - --xml "$APP" 2>/dev/null | grep -q "com.apple.security.cs.allow-jit"; then
+            echo "::error::La app salió SIN entitlements. Revisa el paso «Preparar la firma de macOS» y bundle.macOS.entitlements en tauri.conf.json."
+            exit 1
+          fi
+          echo "Entitlements aplicados."
 
   activar:
     needs: publish
