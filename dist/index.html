@@ -35,7 +35,16 @@
         /* Sobre una franja casi blanca, un hover blanco no se vería: aquí oscurece. */
         --hover: rgba(0, 0, 0, 0.06);
         --btn-hover: rgba(0, 0, 0, 0.08);
-        --sep: rgba(0, 0, 0, 0.22);          /* separador fino entre pestañas inactivas */
+        --sep: rgba(0, 0, 0, 0.22);          /* aro del favicon mientras carga */
+        /* PROFUNDIDAD. La inactiva no lleva un relleno gris —un bloque sólido pesa y compite
+           con la activa— sino un velo casi imperceptible y una sombra INTERIOR: parece estar un
+           plano por debajo. Al pasar el ratón cambia de signo, la sombra sale hacia fuera y la
+           pestaña sube: por eso el hover va hacia el BLANCO de la activa y no hacia el gris. */
+        --tab-atras: rgba(0, 0, 0, 0.035);
+        --tab-atras-sombra: inset 0 1px 1.5px rgba(0, 0, 0, 0.055);
+        --tab-hover-bg: rgba(255, 255, 255, 0.85);
+        --tab-hover-sombra: 0 1px 3px rgba(0, 0, 0, 0.10);
+        --tab-activa-sombra: 0 -1px 4px rgba(0, 0, 0, 0.07);
       }
       /* ── Quién decide el tema ──
          La APP, no Windows: la web elige su modo con su propio botón (clase `dark` en su
@@ -57,6 +66,13 @@
           --hover: rgba(255, 255, 255, 0.08);
           --btn-hover: rgba(255, 255, 255, 0.1);
           --sep: rgba(255, 255, 255, 0.25);
+        /* En oscuro el movimiento es el mismo pero con luz: la inactiva se hunde con un velo
+           blanco muy tenue y una sombra negra dentro; al pasar el ratón sube hacia la luz. */
+        --tab-atras: rgba(255, 255, 255, 0.035);
+        --tab-atras-sombra: inset 0 1px 1.5px rgba(0, 0, 0, 0.35);
+        --tab-hover-bg: rgba(255, 255, 255, 0.10);
+        --tab-hover-sombra: 0 1px 3px rgba(0, 0, 0, 0.45);
+        --tab-activa-sombra: 0 -1px 4px rgba(0, 0, 0, 0.35);
         }
       }
       :root.oscuro {
@@ -69,6 +85,13 @@
         --hover: rgba(255, 255, 255, 0.08);
         --btn-hover: rgba(255, 255, 255, 0.1);
         --sep: rgba(255, 255, 255, 0.25);
+        /* En oscuro el movimiento es el mismo pero con luz: la inactiva se hunde con un velo
+           blanco muy tenue y una sombra negra dentro; al pasar el ratón sube hacia la luz. */
+        --tab-atras: rgba(255, 255, 255, 0.035);
+        --tab-atras-sombra: inset 0 1px 1.5px rgba(0, 0, 0, 0.35);
+        --tab-hover-bg: rgba(255, 255, 255, 0.10);
+        --tab-hover-sombra: 0 1px 3px rgba(0, 0, 0, 0.45);
+        --tab-activa-sombra: 0 -1px 4px rgba(0, 0, 0, 0.35);
       }
       * { box-sizing: border-box; }
       html, body {
@@ -119,53 +142,46 @@
         height: 30px;
         margin-bottom: 5px;
         padding: 0 6px 0 10px;
-        border-radius: 9px;         /* inactiva: píldora redondeada (hover) */
+        border-radius: 9px;         /* inactiva: píldora redondeada */
         position: relative;
-        overflow: visible;          /* deja asomar las curvas de la base de la activa */
+        overflow: visible;          /* las sombras viven fuera de la caja */
+        transition: background 140ms ease, box-shadow 140ms ease, color 140ms ease;
       }
-      .tab:not(.active):hover { background: var(--hover); }
-      /* Separador fino a la IZQUIERDA de cada inactiva; se oculta pegado a la activa,
-         al hover y en la primera (igual que Chrome). */
-      .tab:not(.active)::before {
-        content: "";
-        position: absolute;
-        left: -1px;
-        top: 50%;
-        transform: translateY(-50%);
-        width: 1px;
-        height: 16px;
-        background: var(--sep);
+      /* ── PROFUNDIDAD: las que no mandan están detrás ──────────────────────────────────
+         Antes la inactiva no era nada: texto suelto sobre la franja, al mismo plano que la
+         activa, y lo único que las separaba era un filete de 1px. Ahora la inactiva se HUNDE
+         —velo tenue y sombra interior— y al pasar el ratón el gesto se invierte: la sombra sale
+         hacia fuera y el fondo tira hacia el blanco de la activa, así que la pestaña sube hacia
+         ti. Es sombra y no relleno a propósito: un bloque gris sólido pesa tanto como la activa
+         y acaba compitiendo con ella.
+         Con fondo propio el separador vertical entre pestañas sobra —ya se ve dónde acaba cada
+         una—, así que se retiró. */
+      .tab:not(.active) {
+        background: var(--tab-atras);
+        box-shadow: var(--tab-atras-sombra);
       }
-      .tab:first-child::before,
-      .tab:hover::before,
-      .tab.active + .tab::before,
-      .tab:hover + .tab::before { display: none; }
+      .tab:not(.active):hover {
+        background: var(--tab-hover-bg);
+        box-shadow: var(--tab-hover-sombra);
+        color: var(--tab-active-fg);
+      }
       .tab.active {
         background: var(--tab-active-bg);
         color: var(--tab-active-fg);
         height: 35px;
         margin-bottom: 0;           /* su base cae 1px SOBRE el borde de la barra y lo tapa */
         border-radius: 10px 10px 0 0;
+        /* Levantada, apenas: la sombra va HACIA ARRIBA porque abajo la pestaña está fundida con
+           el contenido y una sombra ahí dibujaría una línea donde justamente no debe haberla. */
+        box-shadow: var(--tab-activa-sombra);
         z-index: 1;
       }
-      /* Curvas cóncavas de Chrome en la base de la pestaña activa: dos piezas de 8px con
-         un cuarto de círculo transparente que "derrama" el fondo hacia los lados. */
-      .tab.active::before,
-      .tab.active::after {
-        content: "";
-        position: absolute;
-        bottom: 0;
-        width: 8px;
-        height: 8px;
-      }
-      .tab.active::before {
-        left: -8px;
-        background: radial-gradient(circle at 0 0, transparent 8px, var(--tab-active-bg) 8.5px);
-      }
-      .tab.active::after {
-        right: -8px;
-        background: radial-gradient(circle at 8px 0, transparent 8px, var(--tab-active-bg) 8.5px);
-      }
+      /* AQUÍ ESTABAN LAS CURVAS CÓNCAVAS DE CHROME: dos piezas de 8px a los lados de la activa
+         con un cuarto de círculo transparente que derramaba su fondo hacia fuera. El truco de
+         Chrome funciona porque allí NO hay línea bajo la barra; aquí sí la hay, y esas dos
+         piezas blancas la partían en dos justo a los costados de la pestaña — la «fluctuación»
+         de la esquina. La activa ya se funde con el contenido por su propio fondo, que tapa la
+         línea exactamente por su ancho; sin las piezas no asoma nada. */
       /* ── Color de pestaña ────────────────────────────────────────────────────────────
          Misma idea que los grupos de Chrome: teñir para agrupar de un vistazo («todo lo de
          este cliente, en verde»). El color se elige con clic derecho sobre la pestaña ▸ Color,
@@ -185,8 +201,6 @@
       .tab[data-color="naranja"]  { --tc: 250, 144, 62; }
       .tab[data-color]:not(.active) { background: rgba(var(--tc), 0.18); }
       .tab[data-color]:not(.active):hover { background: rgba(var(--tc), 0.32); }
-      /* Con fondo propio el separador vertical sobra: ya se ve dónde acaba cada pestaña. */
-      .tab[data-color]:not(.active)::before { display: none; }
       .tab[data-color].active { box-shadow: inset 0 3px 0 rgb(var(--tc)); }
       @media (prefers-color-scheme: dark) {
         :root:not(.claro) .tab[data-color]:not(.active) { background: rgba(var(--tc), 0.36); }
