@@ -241,6 +241,11 @@
         overflow: hidden;
         text-overflow: ellipsis;
       }
+      /* La ACTIVA en negrilla: el relieve dice dónde está el plano de delante, pero el peso de
+         la letra es lo que se lee sin mirar. Va en el título y no en la pestaña entera para que
+         el aspa de cerrar no engorde con él. 600 y no 700: a este tamaño el bold entero
+         emborrona, y lo que hace falta es que destaque, no que grite. */
+      .tab.active .titulo { font-weight: 600; }
       .tab .cerrar {
         flex: 0 0 auto;
         width: 18px;
