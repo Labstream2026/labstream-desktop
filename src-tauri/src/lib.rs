@@ -381,6 +381,10 @@ const INIT_JS_TPL: &str = r#"
     // nota y en cualquier campo de la app. En macOS no aplica (Option no toca ctrlKey).
     if (e.altKey) return;
     var mod = e.metaKey || e.ctrlKey;
+    // F5 recarga, como en cualquier navegador de Windows (y Ctrl+F5 / Shift+F5 también). WebView2
+    // tiene apagados sus propios atajos, así que F5 no hacía NADA: el único que recargaba era
+    // Ctrl+R, y va antes del filtro de abajo porque F5 no lleva modificador.
+    if (e.key === 'F5') { e.preventDefault(); location.reload(); return; }
     if (!mod) return;
     var k = e.key;
     if (k === 't' || k === 'T') {
