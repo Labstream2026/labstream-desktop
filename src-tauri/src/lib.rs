@@ -639,8 +639,9 @@ fn activate_tab<R: Runtime>(app: &AppHandle<R>, label: &str) {
         }
         // Reposo: la activa deja de contar; las demás empiezan a contar desde que se ocultan.
         let ahora = Instant::now();
+        let activa = s.active;
         for (i, t) in s.tabs.iter_mut().enumerate() {
-            if i == s.active {
+            if i == activa {
                 t.oculta_desde = None;
                 t.dormida = false;
             } else if t.oculta_desde.is_none() {
