@@ -41,6 +41,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Mutex,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -112,6 +113,10 @@ struct TabRec {
     // Color elegido a mano desde el menú de la pestaña (None = sin teñir). Aquí solo vive el
     // NOMBRE; el tono exacto y cómo se pinta son cosa del CSS de la barra.
     color: Option<String>,
+    // Reposo (ver «Pestañas en reposo»): desde cuándo está oculta (None = es la activa) y si ya
+    // se suspendió.
+    oculta_desde: Option<Instant>,
+    dormida: bool,
 }
 
 // Paleta de colores de pestaña, la misma idea que los grupos de Chrome: sirve para agrupar de
@@ -274,6 +279,43 @@ const INIT_JS_TPL: &str = r#"
   }
   function newTab(url) { emit('ls-new-tab', { url: url }); }
 
+  // ── Reposo ──
+  // El shell suspende las pestañas que llevan un rato ocultas (dejan de gastar CPU y sueltan
+  // memoria). Antes PREGUNTA: una pestaña con una subida o una descarga en curso, o con algo
+  // sonando, no se duerme. Se cuentan las peticiones vivas (fetch y XHR; el stream del chat es
+  // EventSource y no cuenta) y, ante cualquier duda, la cuenta se queda arriba: no dormir es
+  // siempre el lado seguro.
+  var enCurso = 0;
+  try {
+    var _send = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function () {
+      var hecho = false;
+      enCurso++;
+      this.addEventListener('loadend', function () { if (!hecho) { hecho = true; enCurso--; } });
+      try { return _send.apply(this, arguments); }
+      catch (e) { if (!hecho) { hecho = true; enCurso--; } throw e; }
+    };
+    var _fetch = window.fetch;
+    if (_fetch) {
+      window.fetch = function () {
+        enCurso++;
+        var baja = function () { enCurso--; };
+        var p;
+        try { p = _fetch.apply(this, arguments); } catch (e) { baja(); throw e; }
+        p.then(baja, baja);
+        return p;
+      };
+    }
+  } catch (e) {}
+  window.__lsReposo = function () {
+    var suena = false;
+    try {
+      var medios = document.querySelectorAll('video,audio');
+      for (var i = 0; i < medios.length; i++) { if (!medios[i].paused && !medios[i].ended) suena = true; }
+    } catch (e) { suena = true; }
+    emit('ls-reposo', { label: LABEL, libre: enCurso <= 0 && !suena });
+  };
+
   // Las imagenes conservan su URL HTTPS y la sesion del webview. El descargador
   // lsthumb no comparte cookies: falla con miniaturas sin token y omite la
   // revalidacion de permisos al leer del disco. La cache HTTP respeta los ETag
@@ -423,6 +465,89 @@ const INIT_JS_TPL: &str = r#"
 })();
 "#;
 
+// ── Pestañas en reposo ──
+//
+// Cada pestaña es la web app ENTERA: su árbol de React, su conexión del chat, sus sondeos. Con
+// seis abiertas corrían seis, aunque solo se mire una. Una pestaña que lleva REPOSO_TRAS oculta
+// se SUSPENDE (WebView2 `TrySuspend`: se congelan sus temporizadores y el sistema puede recuperar
+// su memoria) y despierta sola, donde estaba, al volver a ella. La activa nunca se duerme, así
+// que los avisos y el globo de no leídos siguen llegando por ella.
+//
+// No se duerme: la que está cargando, la que dice estar ocupada (subida, descarga o audio en
+// curso: ver `__lsReposo` en el script de la pestaña) ni un editor de documentos (`/docs/`:
+// OnlyOffice mantiene su propia conexión de edición y no conviene cortarla).
+// Solo Windows: WKWebView (macOS) no ofrece nada equivalente y ya frena lo oculto por su cuenta.
+const REPOSO_TRAS: Duration = Duration::from_secs(5 * 60);
+const REPOSO_RONDA: Duration = Duration::from_secs(60);
+
+fn puede_reposar(t: &TabRec, activa: bool) -> bool {
+    !activa
+        && !t.dormida
+        && !t.loading
+        && !t.url.contains("/docs/")
+        && t.oculta_desde.map(|d| d.elapsed() >= REPOSO_TRAS).unwrap_or(false)
+}
+
+// Cada minuto: a las candidatas se les PREGUNTA si están libres. La respuesta llega por el
+// evento `ls-reposo` y es ahí donde se suspende.
+fn ronda_de_reposo<R: Runtime>(app: &AppHandle<R>) {
+    let candidatas: Vec<String> = {
+        let shell = app.state::<ShellState>();
+        let s = shell.lock().unwrap();
+        s.tabs.iter().enumerate().filter(|(i, t)| puede_reposar(t, *i == s.active)).map(|(_, t)| t.label.clone()).collect()
+    };
+    for label in candidatas {
+        if let Some(wv) = get_webview(app, &label) {
+            let _ = wv.eval("window.__lsReposo && window.__lsReposo()");
+        }
+    }
+}
+
+fn dormir_pestana<R: Runtime>(app: &AppHandle<R>, label: &str) {
+    {
+        let shell = app.state::<ShellState>();
+        let mut s = shell.lock().unwrap();
+        let activa = s.active;
+        let Some((i, t)) = s.tabs.iter_mut().enumerate().find(|(_, t)| t.label == label) else { return };
+        // Pudo volverse la activa (o empezar a cargar) mientras contestaba.
+        if !puede_reposar(t, i == activa) {
+            return;
+        }
+        t.dormida = true;
+    }
+    if let Some(wv) = get_webview(app, label) {
+        dormir_webview(&wv);
+    }
+}
+
+#[cfg(windows)]
+fn dormir_webview<R: Runtime>(wv: &Webview<R>) {
+    let _ = wv.with_webview(|pw| unsafe {
+        use webview2_com::{Microsoft::Web::WebView2::Win32::ICoreWebView2_3, TrySuspendCompletedHandler};
+        use windows::core::Interface;
+        let Ok(core) = pw.controller().CoreWebView2() else { return };
+        let Ok(core3) = core.cast::<ICoreWebView2_3>() else { return };
+        // Si WebView2 no puede (la pestaña está visible, o usa algo que lo impide), no pasa nada.
+        let _ = core3.TrySuspend(&TrySuspendCompletedHandler::create(Box::new(|_, _| Ok(()))));
+    });
+}
+#[cfg(not(windows))]
+fn dormir_webview<R: Runtime>(_wv: &Webview<R>) {}
+
+// WebView2 ya despierta sola una vista al hacerla visible; se pide igual, por si acaso.
+#[cfg(windows)]
+fn despertar_webview<R: Runtime>(wv: &Webview<R>) {
+    let _ = wv.with_webview(|pw| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_3;
+        use windows::core::Interface;
+        let Ok(core) = pw.controller().CoreWebView2() else { return };
+        let Ok(core3) = core.cast::<ICoreWebView2_3>() else { return };
+        let _ = core3.Resume();
+    });
+}
+#[cfg(not(windows))]
+fn despertar_webview<R: Runtime>(_wv: &Webview<R>) {}
+
 // ── Utilidades del shell ──
 
 fn main_window<R: Runtime>(app: &AppHandle<R>) -> Option<Window<R>> {
@@ -512,6 +637,16 @@ fn activate_tab<R: Runtime>(app: &AppHandle<R>, label: &str) {
         } else {
             return;
         }
+        // Reposo: la activa deja de contar; las demás empiezan a contar desde que se ocultan.
+        let ahora = Instant::now();
+        for (i, t) in s.tabs.iter_mut().enumerate() {
+            if i == s.active {
+                t.oculta_desde = None;
+                t.dormida = false;
+            } else if t.oculta_desde.is_none() {
+                t.oculta_desde = Some(ahora);
+            }
+        }
     }
     let Some(win) = main_window(app) else { return };
     for wv in win.webviews() {
@@ -519,6 +654,7 @@ fn activate_tab<R: Runtime>(app: &AppHandle<R>, label: &str) {
             continue;
         }
         if wv.label() == label {
+            despertar_webview(&wv);
             let _ = wv.show();
             let _ = wv.set_focus();
         } else {
@@ -637,7 +773,7 @@ fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: boo
         let mut s = shell.lock().unwrap();
         let label = format!("tab-{}", s.next_id);
         s.next_id += 1;
-        s.tabs.push(TabRec { label: label.clone(), title: "Labstream OS".into(), url: target.clone(), loading: true, color: None });
+        s.tabs.push(TabRec { label: label.clone(), title: "Labstream OS".into(), url: target.clone(), loading: true, color: None, oculta_desde: if activate { None } else { Some(Instant::now()) }, dormida: false });
         label
     };
 
@@ -1516,6 +1652,19 @@ pub fn run() {
             handle.listen_any("ls-ready", move |_| {
                 layout_all(&h);
                 broadcast(&h);
+            });
+            let h = handle.clone();
+            handle.listen_any("ls-reposo", move |e| {
+                if field_bool(e.payload(), "libre") == Some(true) {
+                    if let Some(l) = field(e.payload(), "label") {
+                        dormir_pestana(&h, &l);
+                    }
+                }
+            });
+            let h = handle.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(REPOSO_RONDA);
+                ronda_de_reposo(&h);
             });
             let h = handle.clone();
             handle.listen_any("ls-new-tab", move |e| {

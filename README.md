@@ -39,6 +39,12 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   resultado. Es un popup nativo del sistema, igual en Windows y macOS, y vive
   solo en el shell (la web app no se toca).
 
+- **Pestañas en reposo** (v1.19.0, solo Windows): cada pestaña es la web app entera, con su
+  conexión del chat y sus sondeos. Una que lleva 5 minutos oculta se **suspende** (WebView2
+  `TrySuspend`: deja de gastar CPU y el sistema puede recuperar su memoria) y despierta sola,
+  donde estaba, al volver a ella. No se duerme la activa, ni una con una subida, una descarga o
+  audio en curso, ni un editor de documentos (`/docs/`).
+
 - **Rastreador de trabajo efectivo** (v1.10.0, `src-tauri/src/tracker.rs`): mide
   cuánto tiempo se trabaja de verdad y en qué aplicación, y lo publica en el
   panel **/rastreo** del servidor. Cada 5 s mira la ventana al frente y si
