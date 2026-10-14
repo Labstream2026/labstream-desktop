@@ -25,6 +25,17 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   edición de un set la pinta del gris del editor: activa se funde con su barra de
   arriba y detrás se reconoce entre las demás. Esa página no cambia el tema de la
   barra (su fondo oscuro no es el de la app).
+- **La IA del equipo** (v1.22.0, Windows con tarjeta NVIDIA): la máscara de «Sujeto» y
+  «Fondo» del editor de revelado la busca la app, no el navegador — ONNX Runtime con
+  DirectML sobre la tarjeta y BiRefNet en media precisión (`src-tauri/src/ia/`): 0,3 s
+  por foto en vez de 2,5–3 s. La primera vez baja ≈700 MB a los datos de la app
+  (`%LOCALAPPDATA%\<identificador>\ia`): ONNX Runtime 1.24.4 DirectML y DirectML 1.15.4
+  de NuGet y el modelo del servidor de la app (`/api/modelos/sujeto-equipo`, con la
+  sesión de la pestaña), todo fijado por huella SHA-256. La página llama a
+  `ia_estado` / `ia_preparar` / `ia_sujeto`, permitidos solo para el origen de la app
+  (`build.rs` + `capabilities/default.json`). El modelo se suelta de la tarjeta a los
+  2 min sin uso. Prueba de punta a punta en la tarjeta del equipo:
+  `LS_IA_DIR=<carpeta> cargo test --lib de_punta_a_punta -- --ignored --nocapture`.
 - **Pestañas con nombre** (v1.21.0): `window.open(url, "ls-…")` o un enlace con
   `target="ls-…"` abre la pestaña la primera vez y las siguientes **vuelven a
   ella** en vez de abrir otra. La página recibe la URL nueva por

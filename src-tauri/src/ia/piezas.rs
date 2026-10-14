@@ -1,0 +1,57 @@
+// ── Lo que la IA baja la primera vez (≈700 MB), de dónde, y con qué huella ──
+//
+// Fijado por versión y huella SHA-256 (comprobadas al bajarlo el 14-oct-2026): si algún día cambia
+// lo que hay en esa dirección, no se usa.
+//
+// - El modelo: BiRefNet general (MIT, ZhengPeng7; el mismo del navegador) en media precisión, del
+//   servidor de la app (api/modelos/sujeto-equipo, con la sesión de la pestaña). Sale de la
+//   exportación ONNX oficial del autor (release v1 de su GitHub, float32) pasada a float16 con la
+//   entrada y la salida en float32 (scripts/modelo-sujeto-equipo.py de labstream-os). Entrada
+//   `input_image` [1, 3, 1024, 1024], salida `output_image` [1, 1, 1024, 1024] (logits). En una RTX
+//   5080: 0,3 s por foto y el mismo borde que el original en la CPU.
+//   El HR (2048 px, matting) se probó y NO va: su convolución deformable, deshecha en GatherND en la
+//   exportación oficial, ocupa 14–15 GB con DirectML y tarda de 6 a 45 s (14-oct-2026).
+// - ONNX Runtime 1.24.4 con DirectML (NuGet de Microsoft): onnxruntime.dll para x64.
+// - DirectML 1.15.4 (NuGet de Microsoft): DirectML.dll para Windows x64 (el paquete trae también
+//   las de Xbox y las de depurar: se saca por su ruta exacta).
+
+use super::bajar::{Forma, Pieza};
+
+pub const NOMBRE_MODELO: &str = "BiRefNet";
+/// El lado de la entrada y de la salida del modelo.
+pub const LADO: usize = 1024;
+
+pub const ARCHIVO_MODELO: &str = "birefnet-general-epoch_244-fp16.onnx";
+pub const DLL_ORT: &str = "onnxruntime.dll";
+pub const DLL_DIRECTML: &str = "DirectML.dll";
+
+static PIEZAS: [Pieza; 3] = [
+    Pieza {
+        nombre: "onnxruntime-directml-1.24.4",
+        url: "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/1.24.4/microsoft.ml.onnxruntime.directml.1.24.4.nupkg",
+        sha256: "57e9f11b73437bef7a309496135d4c1f96b1a8e9ddba60013fa27bfc1d788681",
+        bytes: 12_458_649,
+        forma: Forma::Zip(&["runtimes/win-x64/native/onnxruntime.dll", "runtimes/win-x64/native/onnxruntime_providers_shared.dll"]),
+        con_sesion: false,
+    },
+    Pieza {
+        nombre: "directml-1.15.4",
+        url: "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/1.15.4/microsoft.ai.directml.1.15.4.nupkg",
+        sha256: "4e7cb7ddce8cf837a7a75dc029209b520ca0101470fcdf275c1f49736a3615b9",
+        bytes: 202_292_617,
+        forma: Forma::Zip(&["bin/x64-win/DirectML.dll"]),
+        con_sesion: false,
+    },
+    Pieza {
+        nombre: "birefnet-general-epoch_244-fp16",
+        url: "https://os.labstreamsas.com/api/modelos/sujeto-equipo",
+        sha256: "323232ec73a04ac4d0ef8c325a75aa8d69ed7062235a7cf9941769fae4c9709f",
+        bytes: 489_666_838,
+        forma: Forma::Archivo(ARCHIVO_MODELO),
+        con_sesion: true,
+    },
+];
+
+pub fn todas() -> &'static [Pieza] {
+    &PIEZAS
+}

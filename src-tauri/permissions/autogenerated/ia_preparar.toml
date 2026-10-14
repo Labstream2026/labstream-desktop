@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ia-preparar"
+description = "Enables the ia_preparar command without any pre-configured scope."
+commands.allow = ["ia_preparar"]
+
+[[permission]]
+identifier = "deny-ia-preparar"
+description = "Denies the ia_preparar command without any pre-configured scope."
+commands.deny = ["ia_preparar"]

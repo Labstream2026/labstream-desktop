@@ -18,6 +18,9 @@
     "core:default",
     "opener:default",
     "notification:default",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "allow-ia-estado",
+    "allow-ia-preparar",
+    "allow-ia-sujeto"
   ]
 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ia-sujeto"
+description = "Enables the ia_sujeto command without any pre-configured scope."
+commands.allow = ["ia_sujeto"]
+
+[[permission]]
+identifier = "deny-ia-sujeto"
+description = "Denies the ia_sujeto command without any pre-configured scope."
+commands.deny = ["ia_sujeto"]

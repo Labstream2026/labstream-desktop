@@ -1,6 +1,6 @@
 [package]
 name = "labstream-desktop"
-version = "1.21.0"
+version = "1.22.0"
 description = "Cliente de escritorio de Labstream OS"
 authors = ["Labstream SAS"]
 edition = "2021"
@@ -49,6 +49,10 @@ percent-encoding = "2"
 active-win-pos-rs = "0.11"
 ureq = { version = "2", features = ["json"] }
 gethostname = "0.5"
+# ── La IA del equipo (src/ia, 1.22) ──
+# sha2: la huella de lo que se baja (modelo y motor); zip: sacar las DLL del paquete del motor.
+sha2 = "0.10"
+zip = { version = "4", default-features = false, features = ["deflate"] }
 
 # device_query solo en Windows/Linux: la huella de entrada (posición del mouse + cuántas teclas
 # hay presionadas). En macOS NO se usa —leer el teclado global dispara el permiso de
@@ -64,6 +68,10 @@ device_query = "4"
 # Solo Windows: en macOS no hay API pública sencilla de nivel de audio por app (el equipo de
 # edición es Windows). El `windows` crate ya está en la caché por Tauri.
 [target.'cfg(windows)'.dependencies]
+# IA del equipo (1.22, src/ia/motor.rs): ONNX Runtime con DirectML sobre la tarjeta. `load-dynamic`:
+# nada se enlaza al compilar; la DLL (la de DirectML 1.24, de NuGet) se baja la primera vez y se
+# carga desde la carpeta de la IA. `api-24`: la versión de la API que trae esa DLL.
+ort = { version = "=2.0.0-rc.14", default-features = false, features = ["std", "load-dynamic", "directml", "api-24"] }
 # Pestañas en reposo (1.19): ICoreWebView2_3::TrySuspend. Es la misma versión que ya trae Tauri.
 webview2-com = "0.38"
 windows = { version = "0.61", features = [
@@ -83,4 +91,8 @@ windows = { version = "0.61", features = [
     # Memoria (1.20): ¿cuánto lleva el equipo sin tocar? (para reciclar el proceso gráfico sin que se note)
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_SystemInformation",
+    # IA del equipo (1.22): ¿hay tarjeta NVIDIA? (los adaptadores de DXGI)
+    "Win32_Graphics_Dxgi",
+    # y cargar DirectML.dll por su ruta antes que ONNX Runtime (src/ia/motor.rs)
+    "Win32_System_LibraryLoader",
 ] }

@@ -38,6 +38,7 @@ mod cache;
 mod tracker;
 mod salud;
 mod memoria;
+mod ia;
 
 use std::{
     collections::HashMap,
@@ -1694,7 +1695,9 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         // El cajón de miniaturas (ver el módulo `cache` y el handler de arriba). Registrado en el
         // builder para que TODAS las webviews de pestaña puedan usarlo.
-        .register_asynchronous_uri_scheme_protocol("lsthumb", responder_lsthumb);
+        .register_asynchronous_uri_scheme_protocol("lsthumb", responder_lsthumb)
+        // La IA del equipo (src/ia): la máscara de sujeto con la tarjeta NVIDIA, para la página.
+        .invoke_handler(tauri::generate_handler![ia::ia_estado, ia::ia_preparar, ia::ia_sujeto]);
 
     let app = builder
         .manage(ShellState::default())
