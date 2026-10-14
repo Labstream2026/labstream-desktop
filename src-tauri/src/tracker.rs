@@ -279,7 +279,7 @@ fn es_navegador(app: &str) -> bool {
 // si hay sonido saliendo AHORA. Un video mudo no se detecta (no suena); es el límite honesto de
 // medirlo desde fuera del navegador.
 #[cfg(windows)]
-fn hay_audio_sonando() -> bool {
+pub(crate) fn hay_audio_sonando() -> bool {
     use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
     use windows::Win32::Media::Audio::{eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator};
     use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
@@ -300,7 +300,7 @@ fn hay_audio_sonando() -> bool {
 }
 
 #[cfg(not(windows))]
-fn hay_audio_sonando() -> bool {
+pub(crate) fn hay_audio_sonando() -> bool {
     // macOS: no hay API pública sencilla de nivel de audio; la excepción del video no aplica aquí
     // (el equipo de edición es Windows). Follow-up posible con CoreAudio. false = como siempre.
     false

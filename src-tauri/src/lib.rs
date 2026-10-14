@@ -36,6 +36,8 @@
 
 mod cache;
 mod tracker;
+mod salud;
+mod memoria;
 
 use std::{
     collections::HashMap,
@@ -117,6 +119,9 @@ struct TabRec {
     // se suspendió.
     oculta_desde: Option<Instant>,
     dormida: bool,
+    // Ahorro de memoria (memoria.rs): su webview se cerró tras DESCARTE_TRAS dormida. Sigue en la
+    // barra con título, URL y color, y se crea otra vez al volver a ella.
+    descartada: bool,
 }
 
 // Paleta de colores de pestaña, la misma idea que los grupos de Chrome: sirve para agrupar de
@@ -189,6 +194,10 @@ struct Persisted {
     // que un estado.json viejo (sin colores) siga cargando tal cual.
     #[serde(default)]
     colors: Vec<String>,
+    // Título de cada pestaña (mismo orden): al abrir, las que no son la activa se quedan sin
+    // cargar (ver `registrar_diferida`) y la barra necesita algo que enseñar mientras tanto.
+    #[serde(default)]
+    titles: Vec<String>,
     #[serde(default)]
     active: usize,
     #[serde(default)]
@@ -220,6 +229,7 @@ fn save_persisted<R: Runtime>(app: &AppHandle<R>) {
             win: s.win,
             tabs: s.tabs.iter().map(|t| t.url.clone()).collect(),
             colors: s.tabs.iter().map(|t| t.color.clone().unwrap_or_default()).collect(),
+            titles: s.tabs.iter().map(|t| t.title.clone()).collect(),
             active: s.active,
             autostart: s.autostart,
             dark: s.dark,
@@ -278,6 +288,23 @@ const INIT_JS_TPL: &str = r#"
     catch (e) { try { T.opener.openUrl(url); } catch (_) {} }
   }
   function newTab(url) { emit('ls-new-tab', { url: url }); }
+
+  // ── Errores de la página → diario de salud del shell (salud.log) ──
+  // Solo el mensaje, el archivo:línea y la ruta (sin datos del formulario ni de la sesión). Como
+  // mucho 20 por carga de página; el shell además descarta repetidos durante un minuto.
+  var errores = 0;
+  function reportarError(tipo, msg, src) {
+    if (++errores > 20) return;
+    emit('ls-error', { label: LABEL, tipo: tipo, msg: String(msg || '').slice(0, 300), src: String(src || '').slice(0, 200), url: location.pathname });
+  }
+  addEventListener('error', function (e) {
+    // Con captura llegan también las imágenes o scripts que no cargan: esos no traen mensaje.
+    if (e && e.message) reportarError('error', e.message, (e.filename || '') + ':' + (e.lineno || 0));
+  }, true);
+  addEventListener('unhandledrejection', function (e) {
+    var r = e && e.reason;
+    reportarError('promesa', (r && (r.stack || r.message)) || r, '');
+  });
 
   // ── Reposo ──
   // El shell suspende las pestañas que llevan un rato ocultas (dejan de gastar CPU y sueltan
@@ -501,6 +528,27 @@ fn ronda_de_reposo<R: Runtime>(app: &AppHandle<R>) {
             let _ = wv.eval("window.__lsReposo && window.__lsReposo()");
         }
     }
+    // Ahorro de memoria: las que llevan DESCARTE_TRAS ocultas y ya están dormidas (pasaron el
+    // filtro de arriba: sin subida, descarga ni audio, y no son un editor) se descartan.
+    let a_descartar: Vec<String> = {
+        let shell = app.state::<ShellState>();
+        let s = shell.lock().unwrap();
+        s.tabs
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| {
+                *i != s.active
+                    && t.dormida
+                    && !t.descartada
+                    && !t.url.contains("/docs/")
+                    && t.oculta_desde.map(|d| d.elapsed() >= memoria::DESCARTE_TRAS).unwrap_or(false)
+            })
+            .map(|(_, t)| t.label.clone())
+            .collect()
+    };
+    for label in a_descartar {
+        descartar_pestana(app, &label);
+    }
 }
 
 fn dormir_pestana<R: Runtime>(app: &AppHandle<R>, label: &str) {
@@ -649,6 +697,8 @@ fn activate_tab<R: Runtime>(app: &AppHandle<R>, label: &str) {
             }
         }
     }
+    // Descartada por ahorro de memoria: se crea otra vez en su última URL antes de mostrarla.
+    revivir_pestana(app, label);
     let Some(win) = main_window(app) else { return };
     for wv in win.webviews() {
         if wv.label() == CHROME {
@@ -656,10 +706,13 @@ fn activate_tab<R: Runtime>(app: &AppHandle<R>, label: &str) {
         }
         if wv.label() == label {
             despertar_webview(&wv);
+            memoria::nivel_bajo(&wv, false);
             let _ = wv.show();
             let _ = wv.set_focus();
         } else {
             let _ = wv.hide();
+            // Oculta: que WebView2 suelte cachés y memoria que puede regenerar (memoria.rs).
+            memoria::nivel_bajo(&wv, true);
         }
     }
     broadcast(app);
@@ -774,18 +827,40 @@ fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: boo
         let mut s = shell.lock().unwrap();
         let label = format!("tab-{}", s.next_id);
         s.next_id += 1;
-        s.tabs.push(TabRec { label: label.clone(), title: "Labstream OS".into(), url: target.clone(), loading: true, color: None, oculta_desde: if activate { None } else { Some(Instant::now()) }, dormida: false });
+        s.tabs.push(TabRec { label: label.clone(), title: "Labstream OS".into(), url: target.clone(), loading: true, color: None, oculta_desde: if activate { None } else { Some(Instant::now()) }, dormida: false, descartada: false });
         label
     };
 
-    let Some(win) = main_window(app) else { return };
+    match montar_webview(app, &label, parsed) {
+        Ok(_) => {
+            if activate {
+                activate_tab(app, &label);
+            } else {
+                broadcast(app);
+                save_persisted(app);
+            }
+        }
+        Err(e) => {
+            salud::anotar("ERROR", "pestaña", &format!("no se pudo crear el webview: {e}"));
+            // Revertir el registro si el webview no se pudo crear.
+            let shell = app.state::<ShellState>();
+            let mut s = shell.lock().unwrap();
+            s.tabs.retain(|t| t.label != label);
+        }
+    }
+}
+
+// Crea el webview de una pestaña: una nueva (create_tab) o una descartada que vuelve
+// (revivir_pestana, al activarla). Lo vigila salud.rs: si su proceso muere, se recarga sola.
+fn montar_webview<R: Runtime>(app: &AppHandle<R>, label: &str, parsed: Url) -> tauri::Result<Webview<R>> {
+    let win = main_window(app).ok_or(tauri::Error::WindowNotFound)?;
     let scale = win.scale_factor().unwrap_or(1.0);
     let size = win.inner_size().map(|s| s.to_logical::<f64>(scale)).unwrap_or(LogicalSize::new(1400.0, 900.0));
 
-    let init = INIT_JS_TPL.replace("__LABEL__", &label).replace("__ORIGIN__", SERVER_URL);
+    let init = INIT_JS_TPL.replace("__LABEL__", label).replace("__ORIGIN__", SERVER_URL);
     let app_zoom = app.clone();
     let app_navigation = app.clone();
-    let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed))
+    let builder = WebviewBuilder::new(label, WebviewUrl::External(parsed))
         .initialization_script(&init)
         .on_navigation(move |url| {
             if url.scheme() == "https" && url.host_str().map(is_google_host).unwrap_or(false) {
@@ -822,28 +897,109 @@ fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: boo
             set_loading(&app_zoom, wv.label(), cargando);
         });
 
-    let created = win.add_child(
+    let wv = win.add_child(
         builder,
         LogicalPosition::new(0.0, TAB_BAR_H),
         LogicalSize::new(size.width, (size.height - TAB_BAR_H).max(0.0)),
-    );
+    )?;
+    // Si su proceso de WebView2 muere o se cuelga, se anota y la pestaña se recarga sola.
+    salud::vigilar_pestana(app, &wv);
+    Ok(wv)
+}
 
-    match created {
-        Ok(_) => {
-            if activate {
-                activate_tab(app, &label);
-            } else {
-                broadcast(app);
-                save_persisted(app);
-            }
+// Ahorro de memoria: una pestaña dormida desde hace DESCARTE_TRAS se cierra de verdad (su proceso
+// sale de la memoria) y queda en la barra con su título, URL y color. `activate_tab` la revive.
+fn descartar_pestana<R: Runtime>(app: &AppHandle<R>, label: &str) {
+    {
+        let shell = app.state::<ShellState>();
+        let mut s = shell.lock().unwrap();
+        let activa = s.active;
+        let Some((i, t)) = s.tabs.iter_mut().enumerate().find(|(_, t)| t.label == label) else { return };
+        if i == activa || !t.dormida || t.descartada {
+            return;
         }
-        Err(_) => {
-            // Revertir el registro si el webview no se pudo crear.
+        t.descartada = true;
+        t.dormida = false;
+    }
+    if let Some(wv) = get_webview(app, label) {
+        let _ = wv.close();
+    }
+    salud::anotar("INFO", "memoria", &format!("pestaña {label} descartada (lleva {} min dormida)", memoria::DESCARTE_TRAS.as_secs() / 60));
+}
+
+// Una pestaña de la sesión anterior que no es la activa: entra en la barra SIN webview (como si se
+// hubiera descartado) y se crea la primera vez que se activa.
+fn registrar_diferida<R: Runtime>(app: &AppHandle<R>, url: &str, title: &str) {
+    let shell = app.state::<ShellState>();
+    let mut s = shell.lock().unwrap();
+    let label = format!("tab-{}", s.next_id);
+    s.next_id += 1;
+    let title = if title.is_empty() { "Labstream OS".to_string() } else { title.to_string() };
+    s.tabs.push(TabRec { label, title, url: url.to_string(), loading: false, color: None, oculta_desde: Some(Instant::now()), dormida: false, descartada: true });
+}
+
+// Vuelve a crear el webview de una pestaña descartada, en su última URL. Devuelve false si no se
+// pudo (la pestaña se deja como estaba y se anota).
+fn revivir_pestana<R: Runtime>(app: &AppHandle<R>, label: &str) -> bool {
+    let url = {
+        let shell = app.state::<ShellState>();
+        let s = shell.lock().unwrap();
+        match s.tabs.iter().find(|t| t.label == label) {
+            Some(t) if t.descartada => t.url.clone(),
+            _ => return true, // no estaba descartada: nada que hacer
+        }
+    };
+    let Ok(parsed) = Url::parse(&url) else { return false };
+    match montar_webview(app, label, parsed) {
+        Ok(_) => {
             let shell = app.state::<ShellState>();
             let mut s = shell.lock().unwrap();
-            s.tabs.retain(|t| t.label != label);
+            if let Some(t) = s.tabs.iter_mut().find(|t| t.label == label) {
+                t.descartada = false;
+                t.loading = true;
+            }
+            true
+        }
+        Err(e) => {
+            salud::anotar("ERROR", "memoria", &format!("no se pudo revivir la pestaña {label}: {e}"));
+            false
         }
     }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+// Una pestaña que se cayó varias veces seguidas ya no se recarga sola (salud.rs): se avisa para
+// que la persona la recargue (F5) o la cierre, en vez de dejarla en blanco sin explicación.
+pub(crate) fn aviso_pestana_rota<R: Runtime>(app: &AppHandle<R>, label: &str) {
+    let titulo = {
+        let shell = app.state::<ShellState>();
+        let s = shell.lock().unwrap();
+        s.tabs.iter().find(|t| t.label == label).map(|t| t.title.clone()).unwrap_or_else(|| "Una pestaña".into())
+    };
+    let _ = app
+        .notification()
+        .builder()
+        .title("Labstream OS")
+        .body(format!("«{titulo}» falló varias veces seguidas. Recárgala con F5 o ciérrala."))
+        .show();
+}
+
+// Memoria alta (salud.rs): las pestañas ocultas se duermen YA, sin esperar sus 5 minutos. Se les
+// adelanta el reloj de «oculta desde» y se pasa la ronda normal, que sigue preguntando a cada una
+// si está libre (una subida, una descarga o algo sonando no se duermen nunca).
+fn dormir_ocultas_ya<R: Runtime>(app: &AppHandle<R>) {
+    {
+        let shell = app.state::<ShellState>();
+        let mut s = shell.lock().unwrap();
+        let activa = s.active;
+        let antes = Instant::now().checked_sub(REPOSO_TRAS).unwrap_or_else(Instant::now);
+        for (i, t) in s.tabs.iter_mut().enumerate() {
+            if i != activa && t.oculta_desde.is_some() {
+                t.oculta_desde = Some(antes);
+            }
+        }
+    }
+    ronda_de_reposo(app);
 }
 
 // Cierra una pestaña; si era la activa, activa la vecina. Nunca deja cero pestañas.
@@ -1059,6 +1215,9 @@ fn show_app_menu<R: Runtime>(app: &AppHandle<R>) {
                 &CheckMenuItem::with_id(app, "autostart-toggle", "Iniciar con el sistema", true, autostart_on, None::<&str>)?,
                 &MenuItem::with_id(app, "check-update", "Buscar actualización…", true, None::<&str>)?,
                 &PredefinedMenuItem::separator(app)?,
+                &MenuItem::with_id(app, "salud-resumen", salud::resumen(), false, None::<&str>)?,
+                &MenuItem::with_id(app, "diagnostico", "Abrir diagnóstico", true, None::<&str>)?,
+                &PredefinedMenuItem::separator(app)?,
                 &MenuItem::with_id(app, "version", &version, false, None::<&str>)?,
                 &MenuItem::with_id(app, "quit-app", "Salir de Labstream OS", true, None::<&str>)?,
             ],
@@ -1253,19 +1412,34 @@ async fn check_update_manual(handle: tauri::AppHandle) {
     match updater.check().await {
         Ok(Some(update)) => {
             notify(format!("Instalando la versión {}…", update.version));
-            if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
-                handle.restart();
-            } else {
-                notify("No se pudo instalar la actualización. Intenta de nuevo más tarde.".into());
+            let version = update.version.clone();
+            match update.download_and_install(|_, _| {}, move || salud::antes_de_actualizar(&version)).await {
+                Ok(()) => handle.restart(),
+                Err(e) => {
+                    salud::anotar("ERROR", "actualizacion", &format!("no se pudo instalar: {e}"));
+                    notify("No se pudo instalar la actualización. Intenta de nuevo más tarde.".into());
+                }
             }
         }
         Ok(None) => notify(format!("Estás en la última versión ({}).", handle.package_info().version)),
-        Err(_) => notify("No se pudo comprobar la actualización (revisa la red).".into()),
+        Err(e) => {
+            salud::anotar("AVISO", "actualizacion", &format!("no se pudo comprobar: {e}"));
+            notify("No se pudo comprobar la actualización (revisa la red).".into());
+        }
+    }
+}
+
+// ⋮ ▸ Abrir diagnóstico (y la bandeja): la carpeta con salud.log y recursos.csv, para mirarla o
+// mandarla cuando algo falle.
+fn abrir_diagnostico<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(dir) = salud::carpeta() {
+        let _ = app.opener().open_path(dir.to_string_lossy().to_string(), None::<&str>);
     }
 }
 
 // Muestra y enfoca la ventana principal (tray, dock, segunda instancia).
 fn show_main<R: Runtime>(app: &AppHandle<R>) {
+    memoria::a_la_vista(app);
     if let Some(w) = main_window(app) {
         let _ = w.show();
         let _ = w.unminimize();
@@ -1281,8 +1455,21 @@ async fn check_update(handle: tauri::AppHandle) {
         Ok(u) => u,
         Err(_) => return,
     };
-    if let Ok(Some(update)) = updater.check().await {
-        if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
+    let update = match updater.check().await {
+        Ok(Some(u)) => u,
+        Ok(None) => return,
+        Err(e) => {
+            salud::anotar("AVISO", "actualizacion", &format!("no se pudo comprobar: {e}"));
+            return;
+        }
+    };
+    {
+        let version = update.version.clone();
+        let r = update.download_and_install(|_, _| {}, move || salud::antes_de_actualizar(&version)).await;
+        if let Err(e) = &r {
+            salud::anotar("ERROR", "actualizacion", &format!("no se pudo instalar: {e}"));
+        }
+        if r.is_ok() {
             let _ = handle
                 .notification()
                 .builder()
@@ -1405,6 +1592,8 @@ pub fn run() {
         .manage(Descargas::default())
         .setup(|app| {
             let handle = app.handle().clone();
+            // Lo primero: el diario de salud (pánicos, cierres de golpe, reinicio automático).
+            salud::preparar(&handle);
             let saved = load_persisted(&handle);
 
             // Arranque automático al iniciar sesión: por defecto activado, pero se respeta
@@ -1571,6 +1760,7 @@ pub fn run() {
                 }
                 id if id.starts_with("tab-color-") => tab_menu_action(app, id),
                 "autostart-toggle" => toggle_autostart(app),
+                "diagnostico" => abrir_diagnostico(app),
                 "clear-cache" => {
                     let antes = cache::tamano(app);
                     cache::vaciar(app);
@@ -1610,7 +1800,11 @@ pub fn run() {
             // Pestañas de la sesión anterior (o una nueva si no hay), cada una con su color.
             // El color se empareja con su URL ANTES de filtrar: el filtro por origen puede
             // descartar entradas y entonces los índices de las dos listas dejarían de casar.
-            let restore: Vec<(String, String)> = {
+            // Ahorro de memoria al abrir: solo se CARGA la pestaña que estaba activa; las demás se
+            // registran descartadas (título, URL y color en la barra) y se crean al hacer clic en
+            // ellas, como hacen Chrome y Edge. Antes se cargaban todas a la vez: con 5 pestañas, 5
+            // copias enteras de la web app arrancando juntas.
+            let restore: Vec<(String, String, String)> = {
                 let server = Url::parse(SERVER_URL).expect("URL del servidor válida");
                 saved
                     .tabs
@@ -1618,16 +1812,23 @@ pub fn run() {
                     .enumerate()
                     .filter(|(_, u)| Url::parse(u).map(|p| es_pestana_interna(&p, &server)).unwrap_or(false))
                     .take(12)
-                    .map(|(i, u)| (u.clone(), saved.colors.get(i).cloned().unwrap_or_default()))
+                    .map(|(i, u)| {
+                        (u.clone(), saved.colors.get(i).cloned().unwrap_or_default(), saved.titles.get(i).cloned().unwrap_or_default())
+                    })
                     .collect()
             };
             if restore.is_empty() {
                 create_tab(&handle, None, true);
             } else {
-                for (url, color) in &restore {
-                    create_tab(&handle, Some(url.clone()), false);
+                let idx = saved.active.min(restore.len() - 1);
+                for (i, (url, color, title)) in restore.iter().enumerate() {
+                    if i == idx {
+                        create_tab(&handle, Some(url.clone()), false);
+                    } else {
+                        registrar_diferida(&handle, url, title);
+                    }
                     if !color.is_empty() {
-                        // create_tab acaba de empujar su pestaña al final de la lista.
+                        // La pestaña se acaba de empujar al final de la lista.
                         let shell = handle.state::<ShellState>();
                         let mut s = shell.lock().unwrap();
                         if let Some(t) = s.tabs.last_mut() {
@@ -1637,7 +1838,6 @@ pub fn run() {
                         }
                     }
                 }
-                let idx = saved.active.min(restore.len() - 1);
                 let label = {
                     let shell = handle.state::<ShellState>();
                     let s = shell.lock().unwrap();
@@ -1803,9 +2003,16 @@ pub fn run() {
             let abrir = MenuItem::with_id(app, "abrir", "Abrir Labstream", true, None::<&str>)?;
             let salir = MenuItem::with_id(app, "salir", "Salir", true, None::<&str>)?;
             let (trk_estado, trk_toggle) = tracker::armar_menu(app.handle())?;
+            // Lo que gasta la app entera (exe + todos sus procesos de WebView2), cada minuto.
+            let recursos = MenuItem::with_id(app, "salud-recursos", salud::resumen(), false, None::<&str>)?;
+            let diagnostico = MenuItem::with_id(app, "diagnostico", "Abrir diagnóstico", true, None::<&str>)?;
             let sep1 = PredefinedMenuItem::separator(app)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
-            let menu = Menu::with_items(app, &[&abrir, &sep1, &trk_estado, &trk_toggle, &sep2, &salir])?;
+            let sep3 = PredefinedMenuItem::separator(app)?;
+            let menu = Menu::with_items(
+                app,
+                &[&abrir, &sep1, &trk_estado, &trk_toggle, &sep2, &recursos, &diagnostico, &sep3, &salir],
+            )?;
 
             TrayIconBuilder::with_id("main-tray")
                 .icon(app.default_window_icon().unwrap().clone())
@@ -1814,6 +2021,7 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "abrir" => show_main(app),
+                    "diagnostico" => abrir_diagnostico(app),
                     "salir" => {
                         save_persisted(app);
                         app.exit(0);
@@ -1837,6 +2045,20 @@ pub fn run() {
             // El sensor del rastreador: listener de vinculación + hilo de medición.
             tracker::iniciar(app.handle());
 
+            // Salud: medición de recursos cada minuto y vigilante del hilo principal.
+            salud::iniciar(app.handle(), recursos, dormir_ocultas_ya);
+            // Errores de JavaScript de las pestañas (los manda el script de cada página).
+            handle.listen_any("ls-error", |e| {
+                let p = e.payload();
+                salud::error_js(
+                    &field(p, "label").unwrap_or_default(),
+                    &field(p, "tipo").unwrap_or_default(),
+                    &field(p, "msg").unwrap_or_default(),
+                    &field(p, "src").unwrap_or_default(),
+                    &field(p, "url").unwrap_or_default(),
+                );
+            });
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1847,6 +2069,8 @@ pub fn run() {
                     let _ = window.hide();
                     api.prevent_close();
                 }
+                // Vuelve a primer plano (p. ej. tras minimizar): memoria normal para lo que se ve.
+                WindowEvent::Focused(true) => memoria::a_la_vista(window.app_handle()),
                 // La barra y las pestañas siguen el tamaño de la ventana.
                 WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                     let app = window.app_handle();
@@ -1908,6 +2132,10 @@ pub fn run() {
         // Al salir del todo, guarda el estado (pestañas, zoom, ventana).
         if let tauri::RunEvent::ExitRequested { .. } = event {
             save_persisted(app);
+        }
+        // Salida limpia: sin esto, el próximo arranque anotaría un «cierre de golpe».
+        if let tauri::RunEvent::Exit = event {
+            salud::salida_limpia();
         }
         let _ = app;
     });

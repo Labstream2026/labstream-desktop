@@ -45,6 +45,41 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   donde estaba, al volver a ella. No se duerme la activa, ni una con una subida, una descarga o
   audio en curso, ni un editor de documentos (`/docs/`).
 
+- **Salud de la app** (v1.20.0, `src-tauri/src/salud.rs`): cuánto gasta de verdad, qué falla
+  y cómo se repone sola. Nada sale del equipo; todo queda en la carpeta de logs de la app
+  (⋮ ▸ *Abrir diagnóstico*, o desde la bandeja).
+  - **Recursos reales**: el exe es pequeño; el gasto está en la docena de procesos de WebView2
+    que cuelgan de él (uno por pestaña, GPU, utilidad), que el Administrador de tareas reparte.
+    Cada minuto se mide el árbol entero —memoria privada, CPU como la columna del Administrador
+    de tareas, número de procesos— y se ve en la bandeja y en ⋮ («Recursos: 2,1 GB · CPU 3 % ·
+    13 procesos»). Cada muestra va a `recursos.csv` (fecha, procesos, MB, CPU, pestañas,
+    dormidas): la curva de un día de trabajo real.
+  - **Diario de errores** (`salud.log`, rota a 2 MB): pánicos de Rust, procesos de WebView2
+    caídos o colgados, errores de JavaScript de las páginas (mensaje y archivo:línea, máx. 20
+    por carga y sin repetidos en un minuto), el hilo principal sin responder (ventana
+    congelada: cuándo y cuánto), fallos del actualizador y **cierres de golpe** (si al arrancar
+    sigue el testigo `en-marcha`, la sesión anterior no terminó bien).
+  - **Se repone sola**: pestaña cuyo proceso muere o se cuelga → se recarga (freno: 3 veces en
+    10 min; después avisa y la deja quieta). Si muere el proceso principal de WebView2 (caen
+    todas) → la app se reinicia sola. Windows la reabre si se cuelga o se cierra de golpe
+    (`RegisterApplicationRestart`). Con el árbol por encima de 3 GB se duermen **ya** las
+    pestañas ocultas (con las mismas reglas del reposo: nunca una con subida, descarga o audio).
+
+- **Ahorro de memoria** (v1.20.0, `src-tauri/src/memoria.rs`). Medido en el equipo de edición:
+  2,2 GB con 5 pestañas tras un día abierta, **1,3 GB de ellos en el proceso gráfico** de WebView2,
+  que crece con las horas y no devuelve nada (reiniciarlo a mano bajó la app a 1,1 GB sin perder
+  nada). Sin quitar funciones:
+  - **Al abrir solo se carga la pestaña activa**; las demás esperan en la barra con su título y
+    se cargan al hacer clic (como Chrome/Edge). Antes arrancaban todas a la vez.
+  - **Pestañas descartadas**: una que lleva 30 min dormida se cierra de verdad y vuelve a su URL
+    al activarla (1-2 s de carga). Nunca un editor de documentos ni una con subida, descarga o audio.
+  - **Nivel de memoria bajo** para lo que no se ve (pestañas ocultas; todo con la ventana en la
+    bandeja o minimizada): WebView2 suelta cachés que puede regenerar.
+  - **El proceso gráfico se recicla** al pasar de 600 MB, solo si nadie mira (ventana oculta o
+    minimizada, o 10 min sin tocar el equipo y sin sonido saliendo), como mucho cada 30 min.
+  - Lo que ya se guardaba en disco sigue igual: la caché HTTP (los archivos de la app vienen con
+    `immutable`, 1 año), el service worker de la web y el cajón de miniaturas (`cache.rs`).
+
 - **Rastreador de trabajo efectivo** (v1.10.0, `src-tauri/src/tracker.rs`): mide
   cuánto tiempo se trabaja de verdad y en qué aplicación, y lo publica en el
   panel **/rastreo** del servidor. Cada 5 s mira la ventana al frente y si

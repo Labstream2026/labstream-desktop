@@ -1,6 +1,6 @@
 [package]
 name = "labstream-desktop"
-version = "1.19.0"
+version = "1.20.0"
 description = "Cliente de escritorio de Labstream OS"
 authors = ["Labstream SAS"]
 edition = "2021"
@@ -75,4 +75,12 @@ windows = { version = "0.61", features = [
     "Win32_System_Variant",
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
+    # Salud (1.20): medir el árbol de procesos (exe + WebView2) y el reinicio automático de Windows.
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_System_Recovery",
+    # Memoria (1.20): ¿cuánto lleva el equipo sin tocar? (para reciclar el proceso gráfico sin que se note)
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_SystemInformation",
 ] }
