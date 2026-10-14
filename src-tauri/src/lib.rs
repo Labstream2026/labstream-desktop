@@ -1442,6 +1442,17 @@ fn show_main<R: Runtime>(app: &AppHandle<R>) {
     memoria::a_la_vista(app);
     if let Some(w) = main_window(app) {
         let _ = w.show();
+        // tao guarda su propia nota de «visible» y `show()` solo llama a ShowWindow si esa nota
+        // cambia (WindowFlags::apply_diff). Visto en el equipo de edición (2026-10-14, 1.19.0): la
+        // ventana estaba OCULTA en Windows con la nota en «visible», así que ni la bandeja, ni el
+        // icono, ni la tecla del MasterHUB la sacaban (set_focus sí corría: tomaba el foco sin
+        // verse). `is_visible()` lee el estado REAL (IsWindowVisible); si no cuadra, se baja y
+        // se sube la nota para que ShowWindow corra de verdad, y se anota para medir cada cuánto pasa.
+        if !w.is_visible().unwrap_or(true) {
+            salud::anotar("AVISO", "ventana", "show() no la mostró (estado de tao desincronizado): se rehace ocultar + mostrar");
+            let _ = w.hide();
+            let _ = w.show();
+        }
         let _ = w.unminimize();
         let _ = w.set_focus();
     }
