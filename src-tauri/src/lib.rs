@@ -81,6 +81,19 @@ fn es_pestana_interna(target: &Url, server: &Url) -> bool {
     target.origin() == server.origin()
 }
 
+// El color que pide una página para su pestaña: solo `#rrggbb` (va a un estilo de la barra; nada
+// que no sea un color llega allí).
+fn color_de_pagina(c: &str) -> Option<String> {
+    let hex = c.strip_prefix('#')?;
+    (hex.len() == 6 && hex.chars().all(|ch| ch.is_ascii_hexdigit())).then(|| c.to_ascii_lowercase())
+}
+
+// Un nombre de ventana que identifica pestaña: los de la app (`ls-…`, p. ej. `ls-edicion-<set>`).
+// Los reservados del navegador (_blank, _self…) y cualquier otro abren pestaña nueva como siempre.
+fn nombre_de_ventana(n: &str) -> Option<String> {
+    (n.starts_with("ls-") && n.len() <= 80 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')).then(|| n.to_string())
+}
+
 #[cfg(test)]
 mod navigation_tests {
     use super::*;
@@ -94,6 +107,20 @@ mod navigation_tests {
         }
         assert!(is_google_host("docs.google.com"));
         assert!(!is_google_host("docs.google.com.evil.example"));
+    }
+
+    #[test]
+    fn la_pagina_solo_pide_colores_y_nombres_de_la_app() {
+        assert_eq!(color_de_pagina("#262626").as_deref(), Some("#262626"));
+        assert_eq!(color_de_pagina("#A0b1C2").as_deref(), Some("#a0b1c2"));
+        for malo in ["", "262626", "#26262", "#2626266", "red", "#26262g", "#262626;background:url(x)"] {
+            assert_eq!(color_de_pagina(malo), None, "{malo}");
+        }
+        assert_eq!(nombre_de_ventana("ls-edicion-cmg123").as_deref(), Some("ls-edicion-cmg123"));
+        for malo in ["", "_blank", "_self", "edicion", "ls-a b", "ls-\"<x>"] {
+            assert_eq!(nombre_de_ventana(malo), None, "{malo}");
+        }
+        assert_eq!(nombre_de_ventana(&format!("ls-{}", "a".repeat(80))), None);
     }
 }
 const TAB_BAR_H: f64 = 40.0; // alto lógico de la barra de pestañas (chrome)
@@ -122,6 +149,12 @@ struct TabRec {
     // Ahorro de memoria (memoria.rs): su webview se cerró tras DESCARTE_TRAS dormida. Sigue en la
     // barra con título, URL y color, y se crea otra vez al volver a ella.
     descartada: bool,
+    // El color que PIDE la página (`<html data-ls-pestana="#262626">`, ver `color_de_pagina`): el
+    // modo edición de un set pinta su pestaña del gris del editor. Lo manda la página, no el menú.
+    pagina: Option<String>,
+    // El nombre de ventana con que se abrió (`window.open(url, nombre)`): abrir otra vez con el
+    // mismo nombre lleva a esta pestaña en vez de abrir otra (ver `reusar_pestana`).
+    nombre: Option<String>,
 }
 
 // Paleta de colores de pestaña, la misma idea que los grupos de Chrome: sirve para agrupar de
@@ -198,6 +231,12 @@ struct Persisted {
     // cargar (ver `registrar_diferida`) y la barra necesita algo que enseñar mientras tanto.
     #[serde(default)]
     titles: Vec<String>,
+    // El color que pidió la página y el nombre de ventana de cada una (mismo orden; "" = ninguno):
+    // la pestaña del modo edición vuelve del gris del editor y se sigue reutilizando.
+    #[serde(default)]
+    paginas: Vec<String>,
+    #[serde(default)]
+    nombres: Vec<String>,
     #[serde(default)]
     active: usize,
     #[serde(default)]
@@ -230,6 +269,8 @@ fn save_persisted<R: Runtime>(app: &AppHandle<R>) {
             tabs: s.tabs.iter().map(|t| t.url.clone()).collect(),
             colors: s.tabs.iter().map(|t| t.color.clone().unwrap_or_default()).collect(),
             titles: s.tabs.iter().map(|t| t.title.clone()).collect(),
+            paginas: s.tabs.iter().map(|t| t.pagina.clone().unwrap_or_default()).collect(),
+            nombres: s.tabs.iter().map(|t| t.nombre.clone().unwrap_or_default()).collect(),
             active: s.active,
             autostart: s.autostart,
             dark: s.dark,
@@ -287,7 +328,9 @@ const INIT_JS_TPL: &str = r#"
     try { T.core.invoke('plugin:opener|open_url', { url: url, with: null }); }
     catch (e) { try { T.opener.openUrl(url); } catch (_) {} }
   }
-  function newTab(url) { emit('ls-new-tab', { url: url }); }
+  function newTab(url, nombre) { emit('ls-new-tab', nombre ? { url: url, name: nombre } : { url: url }); }
+  // Una ventana con nombre de la app (`ls-…`): reabrirla lleva a la pestaña que ya la tiene.
+  function nombreVentana(n) { return typeof n === 'string' && /^ls-[A-Za-z0-9_-]{1,77}$/.test(n) ? n : null; }
 
   // ── Errores de la página → diario de salud del shell (salud.log) ──
   // Solo el mensaje, el archivo:línea y la ruta (sin datos del formulario ni de la sesión). Como
@@ -373,13 +416,25 @@ const INIT_JS_TPL: &str = r#"
     } catch (e) { return null; }
   }
 
+  // ── El color que la página pide para SU pestaña ── `<html data-ls-pestana='#262626'>` (el modo
+  // edición de un set, del gris del editor). "" = ninguno.
+  function colorPestana() {
+    try {
+      var c = document.documentElement && document.documentElement.getAttribute('data-ls-pestana');
+      return c && /^#[0-9a-fA-F]{6}$/.test(c) ? c : '';
+    } catch (e) { return ''; }
+  }
+
   // Título, URL y TEMA → barra de pestañas (y para restaurar la sesión al reabrir).
   // El tema viaja aquí porque la web decide su modo con su propio botón y NO sigue al
-  // sistema: la barra tiene que copiarle a ELLA.
+  // sistema: la barra tiene que copiarle a ELLA. Una página con color propio no lo dice: su
+  // fondo oscuro es el de su pestaña, no el tema de la app.
   function report() {
-    var carga = { label: LABEL, title: document.title || 'Labstream OS', url: location.href };
-    var oscuro = temaOscuro();
-    if (oscuro !== null) carga.dark = oscuro;
+    var carga = { label: LABEL, title: document.title || 'Labstream OS', url: location.href, pestana: colorPestana() };
+    if (!carga.pestana) {
+      var oscuro = temaOscuro();
+      if (oscuro !== null) carga.dark = oscuro;
+    }
     emit('ls-title', carga);
   }
   function watchTitle() {
@@ -404,7 +459,7 @@ const INIT_JS_TPL: &str = r#"
   // por si el tema aterriza tarde con la hidratación.
   function vigilarTema() {
     if (!window.MutationObserver) return;
-    var conf = { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] };
+    var conf = { attributes: true, attributeFilter: ['class', 'style', 'data-theme', 'data-ls-pestana'] };
     if (document.documentElement) new MutationObserver(report).observe(document.documentElement, conf);
     if (document.body) new MutationObserver(report).observe(document.body, conf);
   }
@@ -421,7 +476,8 @@ const INIT_JS_TPL: &str = r#"
     if (!u) return;
     if (isExt(u)) { e.preventDefault(); openExternal(u.href); return; }
     var mod = e.metaKey || e.ctrlKey;
-    if (isApp(u) && (mod || a.target === '_blank')) { e.preventDefault(); newTab(u.href); }
+    var nombre = mod ? null : nombreVentana(a.target);
+    if (isApp(u) && (mod || a.target === '_blank' || nombre)) { e.preventDefault(); newTab(u.href, nombre); }
   }, true);
 
   // Clic con la rueda (botón central) en un enlace interno → pestaña nueva, como en el navegador.
@@ -438,7 +494,7 @@ const INIT_JS_TPL: &str = r#"
   window.open = function (url, name, feats) {
     var u = url ? abs(url) : null;
     if (isExt(u)) { openExternal(u.href); return null; }
-    if (isInterno(u)) { newTab(u.href); return null; }
+    if (isInterno(u)) { newTab(u.href, nombreVentana(name)); return null; }
     return _open ? _open.call(window, url, name, feats) : null;
   };
 
@@ -641,7 +697,7 @@ fn broadcast<R: Runtime>(app: &AppHandle<R>) {
             .tabs
             .iter()
             .enumerate()
-            .map(|(i, t)| json!({ "label": t.label, "title": t.title, "url": t.url, "loading": t.loading, "active": i == s.active, "color": t.color }))
+            .map(|(i, t)| json!({ "label": t.label, "title": t.title, "url": t.url, "loading": t.loading, "active": i == s.active, "color": t.color, "pagina": t.pagina }))
             .collect();
         json!({
             "tabs": tabs,
@@ -814,12 +870,17 @@ fn avisar_descarga_terminada<R: Runtime>(webview: &Webview<R>, url: &Url, path: 
 
 // Crea una pestaña nueva cargando `url` (o el servidor si viene vacío).
 fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: bool) {
+    crear_pestana(app, url, activate, None);
+}
+
+// Lo mismo, con su nombre de ventana (ver `reusar_pestana`). Devuelve la etiqueta de la nueva.
+fn crear_pestana<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: bool, nombre: Option<String>) -> Option<String> {
     let target = url.unwrap_or_else(|| SERVER_URL.to_string());
     // Solo el origen de la app puede abrirse en pestaña; cualquier otra cosa va al navegador.
-    let Ok(parsed) = Url::parse(&target) else { return };
-    let Ok(server) = Url::parse(SERVER_URL) else { return };
+    let parsed = Url::parse(&target).ok()?;
+    let server = Url::parse(SERVER_URL).ok()?;
     if !es_pestana_interna(&parsed, &server) {
-        return;
+        return None;
     }
 
     let label = {
@@ -827,7 +888,7 @@ fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: boo
         let mut s = shell.lock().unwrap();
         let label = format!("tab-{}", s.next_id);
         s.next_id += 1;
-        s.tabs.push(TabRec { label: label.clone(), title: "Labstream OS".into(), url: target.clone(), loading: true, color: None, oculta_desde: if activate { None } else { Some(Instant::now()) }, dormida: false, descartada: false });
+        s.tabs.push(TabRec { label: label.clone(), title: "Labstream OS".into(), url: target.clone(), loading: true, color: None, oculta_desde: if activate { None } else { Some(Instant::now()) }, dormida: false, descartada: false, pagina: None, nombre });
         label
     };
 
@@ -839,6 +900,7 @@ fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: boo
                 broadcast(app);
                 save_persisted(app);
             }
+            Some(label)
         }
         Err(e) => {
             salud::anotar("ERROR", "pestaña", &format!("no se pudo crear el webview: {e}"));
@@ -846,8 +908,44 @@ fn create_tab<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: boo
             let shell = app.state::<ShellState>();
             let mut s = shell.lock().unwrap();
             s.tabs.retain(|t| t.label != label);
+            None
         }
     }
+}
+
+// ── Pestañas con NOMBRE (1.21) ──
+// `window.open(url, "ls-edicion-<set>")` (el modo edición de un set) abre la pestaña la primera
+// vez; las siguientes llevan a ESA pestaña, como hace el navegador con una ventana con nombre, en
+// vez de amontonar una por foto. A la página se le pasa la URL nueva por `__lsAbrir` (el modo
+// edición cambia de foto sin recargar, guardando lo de la que tenía); si no lo conoce, navega.
+// Devuelve false si no hay pestaña con ese nombre (entonces se crea).
+fn reusar_pestana<R: Runtime>(app: &AppHandle<R>, nombre: &str, url: Option<&str>) -> bool {
+    let Ok(server) = Url::parse(SERVER_URL) else { return false };
+    let destino = match url.map(Url::parse) {
+        None => None,
+        Some(Ok(u)) if es_pestana_interna(&u, &server) => Some(u),
+        Some(_) => return false,
+    };
+    let (label, descartada) = {
+        let shell = app.state::<ShellState>();
+        let mut s = shell.lock().unwrap();
+        let Some(t) = s.tabs.iter_mut().find(|t| t.nombre.as_deref() == Some(nombre)) else { return false };
+        // Descartada (sin webview): se crea ya en la URL nueva al activarla.
+        if t.descartada {
+            if let Some(d) = &destino {
+                t.url = d.to_string();
+            }
+        }
+        (t.label.clone(), t.descartada)
+    };
+    activate_tab(app, &label);
+    if let (Some(d), false) = (destino, descartada) {
+        if let Some(wv) = get_webview(app, &label) {
+            let u = serde_json::to_string(d.as_str()).unwrap_or_else(|_| "\"\"".into());
+            let _ = wv.eval(format!("(function(u){{try{{if(window.__lsAbrir&&window.__lsAbrir(u))return}}catch(e){{}}location.assign(u)}})({u})"));
+        }
+    }
+    true
 }
 
 // Crea el webview de una pestaña: una nueva (create_tab) o una descartada que vuelve
@@ -935,7 +1033,7 @@ fn registrar_diferida<R: Runtime>(app: &AppHandle<R>, url: &str, title: &str) {
     let label = format!("tab-{}", s.next_id);
     s.next_id += 1;
     let title = if title.is_empty() { "Labstream OS".to_string() } else { title.to_string() };
-    s.tabs.push(TabRec { label, title, url: url.to_string(), loading: false, color: None, oculta_desde: Some(Instant::now()), dormida: false, descartada: true });
+    s.tabs.push(TabRec { label, title, url: url.to_string(), loading: false, color: None, oculta_desde: Some(Instant::now()), dormida: false, descartada: true, pagina: None, nombre: None });
 }
 
 // Vuelve a crear el webview de una pestaña descartada, en su última URL. Devuelve false si no se
@@ -1815,7 +1913,7 @@ pub fn run() {
             // registran descartadas (título, URL y color en la barra) y se crean al hacer clic en
             // ellas, como hacen Chrome y Edge. Antes se cargaban todas a la vez: con 5 pestañas, 5
             // copias enteras de la web app arrancando juntas.
-            let restore: Vec<(String, String, String)> = {
+            let restore: Vec<(String, String, String, String, String)> = {
                 let server = Url::parse(SERVER_URL).expect("URL del servidor válida");
                 saved
                     .tabs
@@ -1824,7 +1922,8 @@ pub fn run() {
                     .filter(|(_, u)| Url::parse(u).map(|p| es_pestana_interna(&p, &server)).unwrap_or(false))
                     .take(12)
                     .map(|(i, u)| {
-                        (u.clone(), saved.colors.get(i).cloned().unwrap_or_default(), saved.titles.get(i).cloned().unwrap_or_default())
+                        let de = |v: &Vec<String>| v.get(i).cloned().unwrap_or_default();
+                        (u.clone(), de(&saved.colors), de(&saved.titles), de(&saved.paginas), de(&saved.nombres))
                     })
                     .collect()
             };
@@ -1832,21 +1931,21 @@ pub fn run() {
                 create_tab(&handle, None, true);
             } else {
                 let idx = saved.active.min(restore.len() - 1);
-                for (i, (url, color, title)) in restore.iter().enumerate() {
+                for (i, (url, color, title, pagina, nombre)) in restore.iter().enumerate() {
                     if i == idx {
                         create_tab(&handle, Some(url.clone()), false);
                     } else {
                         registrar_diferida(&handle, url, title);
                     }
-                    if !color.is_empty() {
-                        // La pestaña se acaba de empujar al final de la lista.
-                        let shell = handle.state::<ShellState>();
-                        let mut s = shell.lock().unwrap();
-                        if let Some(t) = s.tabs.last_mut() {
-                            if t.url == *url {
-                                t.color = Some(color.clone());
-                            }
+                    // La pestaña se acaba de empujar al final de la lista.
+                    let shell = handle.state::<ShellState>();
+                    let mut s = shell.lock().unwrap();
+                    if let Some(t) = s.tabs.last_mut().filter(|t| t.url == *url) {
+                        if !color.is_empty() {
+                            t.color = Some(color.clone());
                         }
+                        t.pagina = color_de_pagina(pagina);
+                        t.nombre = nombre_de_ventana(nombre);
                     }
                 }
                 let label = {
@@ -1881,7 +1980,13 @@ pub fn run() {
             let h = handle.clone();
             handle.listen_any("ls-new-tab", move |e| {
                 let url = field(e.payload(), "url");
-                create_tab(&h, url, true);
+                let nombre = field(e.payload(), "name").and_then(|n| nombre_de_ventana(&n));
+                if let Some(n) = &nombre {
+                    if reusar_pestana(&h, n, url.as_deref()) {
+                        return;
+                    }
+                }
+                crear_pestana(&h, url, true, nombre);
             });
             let h = handle.clone();
             handle.listen_any("ls-activate", move |e| {
@@ -1982,11 +2087,12 @@ pub fn run() {
             });
             let h = handle.clone();
             handle.listen_any("ls-title", move |e| {
-                let (label, title, url, dark) = (
+                let (label, title, url, dark, pestana) = (
                     field(e.payload(), "label"),
                     field(e.payload(), "title"),
                     field(e.payload(), "url"),
                     field_bool(e.payload(), "dark"),
+                    field(e.payload(), "pestana"),
                 );
                 if let Some(label) = label {
                     let shell = h.state::<ShellState>();
@@ -1997,6 +2103,10 @@ pub fn run() {
                         }
                         if let Some(url) = url {
                             t.url = url;
+                        }
+                        // (una página de antes de la 1.21 no lo manda: se deja como estaba)
+                        if let Some(p) = pestana {
+                            t.pagina = color_de_pagina(&p);
                         }
                     }
                     // El tema es global (todas las pestañas del origen comparten modo): el

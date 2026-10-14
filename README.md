@@ -20,6 +20,16 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
 - **Colores de pestaña** (v1.6.0): clic derecho sobre una pestaña ▸ **Color**, con
   la misma paleta de nueve tonos que usa Chrome para sus grupos. Sirve para agrupar
   de un vistazo (todo lo de un cliente en verde) y **se guarda con la sesión**.
+- **Pestaña del color de su página** (v1.21.0): una página puede pedir el color de
+  su pestaña con `<html data-ls-pestana="#rrggbb">` (solo ese formato). El modo
+  edición de un set la pinta del gris del editor: activa se funde con su barra de
+  arriba y detrás se reconoce entre las demás. Esa página no cambia el tema de la
+  barra (su fondo oscuro no es el de la app).
+- **Pestañas con nombre** (v1.21.0): `window.open(url, "ls-…")` o un enlace con
+  `target="ls-…"` abre la pestaña la primera vez y las siguientes **vuelven a
+  ella** en vez de abrir otra. La página recibe la URL nueva por
+  `window.__lsAbrir(url)` (el modo edición cambia de foto sin recargar); si no lo
+  tiene, navega. Nombre y color se guardan con la sesión.
 - **Zoom de interfaz**: ⌘/Ctrl `+` / `−` / `0` y Ctrl+rueda, con indicador en la
   barra y **persistencia** entre sesiones (50%–250%).
 - **Documentos dentro de la app**: los visores/editores del propio servidor

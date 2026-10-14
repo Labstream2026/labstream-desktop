@@ -7,7 +7,7 @@
     <!--
       Barra de pestañas del shell de escritorio (webview "chrome", local).
       Habla con Rust por eventos (__TAURI__.event):
-        recibe  ls-tabs      {tabs:[{label,title,url,loading,active,color}], zoom, version,
+        recibe  ls-tabs      {tabs:[{label,title,url,loading,active,color,pagina}], zoom, version,
                               mac, win, maximized, dark}
         emite   ls-ready, ls-new-tab, ls-activate, ls-close-tab, ls-reload, ls-zoom, ls-cycle,
                 ls-activate-n, ls-nav, ls-menu, ls-check-update, ls-tab-menu, ls-reorder
@@ -208,6 +208,17 @@
       }
       :root.oscuro .tab[data-color]:not(.active) { background: rgba(var(--tc), 0.36); }
       :root.oscuro .tab[data-color]:not(.active):hover { background: rgba(var(--tc), 0.5); }
+      /* ── La pestaña del COLOR DE SU PÁGINA (1.21) ──
+         La página lo pide (`<html data-ls-pestana="#262626">`): el modo edición de un set pinta la
+         suya del gris del editor. Activa, es de ese color y se funde con la barra de arriba de la
+         página, como la de siempre se funde con el blanco de la app. Detrás, el mismo color: entre
+         las demás se reconoce de un vistazo. Con color del menú encima, ese va de franja arriba.
+         (#tabs delante: gana a las reglas de tema y de color del menú sin !important.) */
+      #tabs .tab.pagina { --muted: color-mix(in srgb, var(--tp-fg) 60%, transparent); background: var(--tp); color: var(--tp-fg); }
+      #tabs .tab.pagina:not(.active) { box-shadow: none; }
+      #tabs .tab.pagina:not(.active):hover { background: color-mix(in srgb, var(--tp) 86%, var(--tp-fg)); color: var(--tp-fg); }
+      #tabs .tab.pagina .cerrar:hover { background: color-mix(in srgb, var(--tp-fg) 18%, transparent); color: var(--tp-fg); }
+      #tabs .tab.pagina[data-color] { box-shadow: inset 0 3px 0 rgb(var(--tc)); }
       /* Reordenar arrastrando: NO se usa drag&drop de HTML5 (en el webview de la barra en
          macOS los eventos no llegan), sino eventos de puntero. Se apaga el arrastre nativo de
          WebKit para que no salga la imagen fantasma al mover una pestaña. */
@@ -500,6 +511,14 @@
         $tabs.classList.toggle("compactas", ancho < 112);
       }
 
+      // ¿Un #rrggbb claro? (luminancia relativa): decide si la letra encima va oscura o clara.
+      function esClaro(hex) {
+        const n = parseInt(hex.slice(1), 16);
+        const lin = (c) => { c /= 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+        const l = 0.2126 * lin((n >> 16) & 255) + 0.7152 * lin((n >> 8) & 255) + 0.0722 * lin(n & 255);
+        return l > 0.35;
+      }
+
       function render() {
         $tabs.textContent = "";
         for (const t of estado.tabs) {
@@ -508,6 +527,12 @@
           el.className = "tab" + (t.active ? " active" : "");
           el.dataset.label = t.label;
           if (t.color) el.dataset.color = t.color; // teñido desde el menú de la pestaña
+          // El color que pide la página (ya validado #rrggbb en el shell), con letra que se lea encima.
+          if (t.pagina) {
+            el.classList.add("pagina");
+            el.style.setProperty("--tp", t.pagina);
+            el.style.setProperty("--tp-fg", esClaro(t.pagina) ? "#202124" : "#ececec");
+          }
           el.title = texto;
 
           const fav = document.createElement("span");
