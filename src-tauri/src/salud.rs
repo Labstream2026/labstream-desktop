@@ -125,6 +125,9 @@ pub fn carpeta() -> Option<PathBuf> {
 
 /// Texto para la bandeja y el menú ⋮.
 pub fn resumen() -> String {
+    if cfg!(not(windows)) {
+        return "Recursos: la medición es solo de Windows".into();
+    }
     let Some(m) = *ULTIMA.lock().unwrap() else { return "Recursos: midiendo…".into() };
     let mem = if m.memoria_mb >= 1024 { format!("{:.1} GB", m.memoria_mb as f64 / 1024.0).replace('.', ",") } else { format!("{} MB", m.memoria_mb) };
     let mut s = format!("Recursos: {mem} · CPU {:.0} % · {} procesos", m.cpu, m.procesos);
@@ -363,9 +366,11 @@ pub fn vigilar_pestana<R: Runtime>(app: &AppHandle<R>, wv: &tauri::Webview<R>) {
                         RECUPERACIONES.fetch_add(1, Ordering::Relaxed);
                         crate::save_persisted(&h);
                         let hh = h.clone();
+                        // Desde un hilo aparte, restart() pide la salida al bucle de eventos: pasa por
+                        // RunEvent::Exit (salida_limpia anota el reinicio y quita el testigo) y el
+                        // plugin de instancia única suelta su mutex ANTES de lanzar la copia nueva.
                         std::thread::spawn(move || {
                             std::thread::sleep(Duration::from_millis(500));
-                            salida_limpia();
                             hh.restart();
                         });
                     }
