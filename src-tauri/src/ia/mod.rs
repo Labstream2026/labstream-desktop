@@ -255,17 +255,17 @@ fn rellenar(rgba: &[u8], ancho: usize, alto: usize) -> Result<Vec<u8>, String> {
     let Some(a) = m.as_mut() else {
         return Err("La IA no está preparada.".into());
     };
-    let (mw, mh) = relleno::tamano_modelo(ancho, alto);
+    let p = relleno::plan(ancho, alto);
     let t0 = Instant::now();
-    let r = a.motor.correr_forma(&[1, 4, mh, mw], relleno::entrada(rgba, ancho, alto, mw, mh));
+    let r = a.motor.correr_forma(&[1, 4, p.ph, p.pw], relleno::entrada(rgba, ancho, alto, p));
     a.usado = Instant::now();
     match r {
-        Ok((_, planos)) if planos.len() == 3 * mw * mh => {
-            crate::salud::anotar("INFO", "ia", &format!("relleno de {ancho}×{alto} (a {mw}×{mh}) en {:.1} s", t0.elapsed().as_secs_f32()));
-            let rgb = relleno::salida(&planos, mw, mh, rgba, ancho, alto);
+        Ok((_, planos)) if planos.len() == 3 * p.pw * p.ph => {
+            crate::salud::anotar("INFO", "ia", &format!("relleno de {ancho}×{alto} (a {}×{} en {}×{}) en {:.1} s", p.sw, p.sh, p.pw, p.ph, t0.elapsed().as_secs_f32()));
+            let rgb = relleno::salida(&planos, p, rgba, ancho, alto);
             Ok(imagen::respuesta(ancho as u32, alto as u32, &rgb))
         }
-        Ok((forma, _)) => Err(format!("El modelo contestó {forma:?} y se esperaba [1, 3, {mh}, {mw}].")),
+        Ok((forma, _)) => Err(format!("El modelo contestó {forma:?} y se esperaba [1, 3, {}, {}].", p.ph, p.pw)),
         Err(e) => {
             *m = None;
             crate::salud::anotar("ERROR", "ia", &format!("no se pudo rellenar: {e}"));
@@ -357,12 +357,12 @@ mod pruebas {
                     rgba[i + 3] = if hueco { 255 } else { 0 };
                 }
             }
-            let (mw, mh) = relleno::tamano_modelo(w, h);
+            let p = relleno::plan(w, h);
             let t = Instant::now();
-            let (_, planos) = m.correr_forma(&[1, 4, mh, mw], relleno::entrada(&rgba, w, h, mw, mh)).unwrap();
-            let rgb = relleno::salida(&planos, mw, mh, &rgba, w, h);
+            let (_, planos) = m.correr_forma(&[1, 4, p.ph, p.pw], relleno::entrada(&rgba, w, h, p)).unwrap();
+            let rgb = relleno::salida(&planos, p, &rgba, w, h);
             let c = (h / 2 * w + w / 2) * 3;
-            eprintln!("{w}×{h} (a {mw}×{mh}): {:.2} s, centro {:?}, esquina {:?}", t.elapsed().as_secs_f32(), &rgb[c..c + 3], &rgb[..3]);
+            eprintln!("{w}×{h} ({p:?}): {:.2} s, centro {:?}, esquina {:?}", t.elapsed().as_secs_f32(), &rgb[c..c + 3], &rgb[..3]);
             // fuera del hueco, lo que había
             assert_eq!(&rgb[..3], &rgba[..3]);
         }
