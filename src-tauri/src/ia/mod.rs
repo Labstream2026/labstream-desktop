@@ -1,38 +1,44 @@
-// ── La IA EN EL EQUIPO: la máscara de sujeto de Labstream OS con la tarjeta NVIDIA (1.22) ──────
+// ── La IA EN EL EQUIPO: la máscara de sujeto (1.22) y Rellenar (1.23) de Labstream OS ──────────
 //
 // Munka: «los pcs que usan esta función tienen Nvidia de 16 GB… el modelo se ejecuta en local y se
-// conecta y sube el resultado a la app». En el editor de revelado (modo edición de un set), «Sujeto»
-// y «Fondo» no los busca el navegador sino esta app: ONNX Runtime con DirectML sobre la tarjeta
-// NVIDIA y BiRefNet en media precisión (piezas.rs): 0,3 s por foto en vez de 2,5–3 s, y sin depender
-// del WebGPU de la pestaña.
+// conecta y sube el resultado a la app». En el editor de revelado (modo edición de un set):
+// - «Sujeto» y «Fondo» los busca esta app: ONNX Runtime con DirectML sobre la tarjeta NVIDIA y
+//   BiRefNet en media precisión (piezas.rs): 0,3 s por foto en vez de 2,5–3 s en el navegador.
+// - «Rellenar» (Eliminar con IA): LaMa rellena lo pintado (relleno.rs), en la CPU (motor.rs:
+//   abrir_en_cpu; LaMa no corre con DirectML).
 //
-// La página (lib/revelado/ia-local en labstream-os) llama a tres comandos, permitidos SOLO para el
+// La página (lib/revelado/ia-local en labstream-os) llama a cuatro comandos, permitidos SOLO para el
 // origen de la app (capabilities/default.json + el manifiesto de build.rs):
-//   ia_estado   → ¿se puede aquí?, ¿está ya bajado?, cuánto falta, qué tarjeta
-//   ia_preparar → baja lo que falte (eventos «ia-progreso» { fase, parte } a esa pestaña) y abre
-//                 el modelo en la tarjeta
+//   ia_estado   ({ que }) → ¿se puede aquí?, ¿está ya bajado?, cuánto falta, qué tarjeta
+//   ia_preparar ({ que }) → baja lo que falte (eventos «ia-progreso» { fase, parte } a esa pestaña)
+//                           y abre el modelo
 //   ia_sujeto   ← RGBA en el cuerpo (binario) + x-ancho / x-alto
 //               → [ancho u32][alto u32][un byte por punto] (lib/revelado/ia-local: leerRespuesta)
-// El resultado vuelve a la página, que lo pone en la máscara y lo guarda con el revelado de la foto.
+//   ia_rellenar ← RGBA con el hueco en el alfa + x-ancho / x-alto
+//               → [ancho u32][alto u32][RGB, 3 bytes por punto]
+// `que` es "sujeto" (o nada: la página de la 1.22) o "relleno". El resultado vuelve a la página, que lo
+// pone en la máscara o en un parche de la foto y lo guarda con su revelado.
 //
-// Nada se baja ni se carga al arrancar la app: solo cuando alguien pide la máscara. Lo bajado vive en
-// los datos de la app del equipo (`carpeta`), comprobado con su huella (bajar.rs). El modelo abierto
-// ocupa la tarjeta (~7 GB mientras busca: DirectML guarda lo que pidió): se suelta a los SOLTAR_TRAS
-// sin usarlo, que los editores trabajan con Resolve abierto.
+// Nada se baja ni se carga al arrancar la app: solo cuando alguien lo pide. Lo bajado vive en los
+// datos de la app del equipo (`carpeta`), comprobado con su huella (bajar.rs). Cada modelo abierto
+// ocupa memoria (el del sujeto, ~7 GB de la tarjeta mientras busca: DirectML guarda lo que pidió):
+// se suelta a los SOLTAR_TRAS sin usarlo, que los editores trabajan con Resolve abierto.
 
 mod bajar;
 mod imagen;
 mod motor;
 mod piezas;
+mod relleno;
 mod tarjeta;
 
+use piezas::Que;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, Runtime, Webview};
 
-/// Sin usarlo este rato, el modelo se suelta de la tarjeta (la siguiente foto tarda ~2 s más).
+/// Sin usarlo este rato, el modelo se suelta (de la tarjeta, o de la memoria el de rellenar).
 const SOLTAR_TRAS: Duration = Duration::from_secs(2 * 60);
 
 struct Abierto {
@@ -40,21 +46,32 @@ struct Abierto {
     usado: Instant,
 }
 
-static MODELO: Mutex<Option<Abierto>> = Mutex::new(None);
+/// El modelo abierto de cada IA: el del sujeto (DirectML) y el de rellenar (CPU).
+static SUJETO: Mutex<Option<Abierto>> = Mutex::new(None);
+static RELLENO: Mutex<Option<Abierto>> = Mutex::new(None);
 /// Una preparación a la vez (dos pestañas que piden a la vez no bajan dos veces).
 static PREPARANDO: Mutex<()> = Mutex::new(());
 static VIGILANTE: std::sync::Once = std::sync::Once::new();
+
+fn abierto(que: Que) -> &'static Mutex<Option<Abierto>> {
+    match que {
+        Que::Sujeto => &SUJETO,
+        Que::Relleno => &RELLENO,
+    }
+}
 
 fn carpeta<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     app.path().app_local_data_dir().map(|d| d.join("ia")).map_err(|e| format!("No hay carpeta de datos de la app: {e}"))
 }
 
-fn faltan(dir: &std::path::Path) -> u64 {
-    piezas::todas().iter().filter(|p| !bajar::esta(dir, p)).map(|p| p.bytes).sum()
+fn faltan(dir: &std::path::Path, que: Que) -> u64 {
+    piezas::de(que).into_iter().filter(|p| !bajar::esta(dir, p)).map(|p| p.bytes).sum()
 }
 
 #[derive(serde::Serialize)]
 pub struct Estado {
+    /// de qué IA habla (así la página sabe que esta app conoce Rellenar)
+    que: &'static str,
     disponible: bool,
     motivo: Option<String>,
     listo: bool,
@@ -63,24 +80,34 @@ pub struct Estado {
     tarjeta: Option<String>,
 }
 
-#[tauri::command]
-pub fn ia_estado<R: Runtime>(app: AppHandle<R>) -> Estado {
-    let t = tarjeta::nvidia();
-    let motivo = if !cfg!(all(windows, target_arch = "x86_64")) {
-        Some("La IA del equipo es para Windows con tarjeta NVIDIA.".to_string())
-    } else if t.is_none() {
+/// Por qué esta IA no puede correr aquí (None: sí puede). El sujeto pide NVIDIA; rellenar va en la CPU.
+fn motivo(que: Que, tarjeta: Option<&tarjeta::Tarjeta>) -> Option<String> {
+    if !cfg!(all(windows, target_arch = "x86_64")) {
+        Some("La IA del equipo es para la app de Windows.".to_string())
+    } else if que == Que::Sujeto && tarjeta.is_none() {
         Some("Este equipo no tiene tarjeta NVIDIA.".to_string())
     } else {
         None
-    };
+    }
+}
+
+#[tauri::command]
+pub fn ia_estado<R: Runtime>(app: AppHandle<R>, que: Option<String>) -> Estado {
+    let que = Que::de(que.as_deref());
+    let t = tarjeta::nvidia();
+    let motivo = motivo(que, t.as_ref());
     let dir = carpeta(&app).ok();
-    let falta = dir.as_deref().map(faltan).unwrap_or(u64::MAX);
+    let falta = dir.as_deref().map(|d| faltan(d, que)).unwrap_or(u64::MAX);
     Estado {
+        que: que.nombre(),
         disponible: motivo.is_none() && dir.is_some(),
         motivo,
         listo: falta == 0,
         faltan: if falta == u64::MAX { 0 } else { falta },
-        modelo: piezas::NOMBRE_MODELO,
+        modelo: match que {
+            Que::Sujeto => piezas::NOMBRE_MODELO,
+            Que::Relleno => piezas::NOMBRE_RELLENO,
+        },
         tarjeta: t.map(|t| t.nombre),
     }
 }
@@ -91,7 +118,8 @@ fn avisar<R: Runtime>(app: &AppHandle<R>, label: &str, fase: &str, parte: f64) {
 
 /// Baja lo que falte y deja el modelo abierto (en un hilo aparte: puede tardar minutos).
 #[tauri::command]
-pub async fn ia_preparar<R: Runtime>(app: AppHandle<R>, webview: Webview<R>) -> Result<(), String> {
+pub async fn ia_preparar<R: Runtime>(app: AppHandle<R>, webview: Webview<R>, que: Option<String>) -> Result<(), String> {
+    let que = Que::de(que.as_deref());
     let label = webview.label().to_string();
     // La sesión de la pestaña, para bajar el modelo del servidor de la app (solo viaja a él). Aquí y
     // no en el hilo de abajo: leer cookies de WebView2 desde un comando síncrono se queda colgado.
@@ -99,23 +127,23 @@ pub async fn ia_preparar<R: Runtime>(app: AppHandle<R>, webview: Webview<R>) -> 
         .ok()
         .and_then(|u| webview.cookies_for_url(u).ok())
         .map(|cs| cs.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; "));
-    tauri::async_runtime::spawn_blocking(move || preparar(&app, &label, sesion.as_deref()))
+    tauri::async_runtime::spawn_blocking(move || preparar(&app, &label, sesion.as_deref(), que))
         .await
         .map_err(|e| format!("La IA no pudo prepararse: {e}"))?
 }
 
-fn preparar<R: Runtime>(app: &AppHandle<R>, label: &str, sesion: Option<&str>) -> Result<(), String> {
-    if tarjeta::nvidia().is_none() {
-        return Err("Este equipo no tiene tarjeta NVIDIA.".into());
+fn preparar<R: Runtime>(app: &AppHandle<R>, label: &str, sesion: Option<&str>, que: Que) -> Result<(), String> {
+    if let Some(m) = motivo(que, tarjeta::nvidia().as_ref()) {
+        return Err(m);
     }
     let _uno = PREPARANDO.lock().unwrap_or_else(|e| e.into_inner());
     let dir = carpeta(app)?;
-    let total = faltan(&dir);
+    let total = faltan(&dir, que);
     if total > 0 {
         let hecho = AtomicU64::new(0);
         let mut ultimo = 0u64;
         avisar(app, label, "bajando", 0.0);
-        for p in piezas::todas() {
+        for p in piezas::de(que) {
             bajar::bajar(&dir, p, sesion, &mut |n| {
                 let h = hecho.fetch_add(n, Ordering::Relaxed) + n;
                 // un aviso cada ~1 %
@@ -129,40 +157,45 @@ fn preparar<R: Runtime>(app: &AppHandle<R>, label: &str, sesion: Option<&str>) -
                 e
             })?;
         }
-        crate::salud::anotar("INFO", "ia", &format!("IA bajada al equipo ({} MB)", total / 1_000_000));
+        crate::salud::anotar("INFO", "ia", &format!("IA de {} bajada al equipo ({} MB)", que.nombre(), total / 1_000_000));
     }
-    let mut m = MODELO.lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = abierto(que).lock().unwrap_or_else(|e| e.into_inner());
     if m.is_none() {
         avisar(app, label, "preparando", 0.0);
         let t0 = Instant::now();
-        let motor = motor::Motor::abrir(&dir).map_err(|e| {
-            crate::salud::anotar("ERROR", "ia", &format!("no se pudo abrir el modelo: {e}"));
+        let motor = match que {
+            Que::Sujeto => motor::Motor::abrir(&dir),
+            Que::Relleno => motor::Motor::abrir_en_cpu(&dir, piezas::ARCHIVO_RELLENO),
+        }
+        .map_err(|e| {
+            crate::salud::anotar("ERROR", "ia", &format!("no se pudo abrir el modelo de {}: {e}", que.nombre()));
             e
         })?;
-        crate::salud::anotar("INFO", "ia", &format!("modelo abierto en {:.1} s ({})", t0.elapsed().as_secs_f32(), motor.donde()));
+        crate::salud::anotar("INFO", "ia", &format!("modelo de {} abierto en {:.1} s ({})", que.nombre(), t0.elapsed().as_secs_f32(), motor.donde()));
         *m = Some(Abierto { motor, usado: Instant::now() });
         vigilar();
     }
     Ok(())
 }
 
-/// Suelta el modelo de la tarjeta cuando lleva SOLTAR_TRAS sin usarse.
+/// Suelta cada modelo cuando lleva SOLTAR_TRAS sin usarse.
 fn vigilar() {
     VIGILANTE.call_once(|| {
         std::thread::spawn(|| loop {
             std::thread::sleep(Duration::from_secs(15));
-            let mut m = MODELO.lock().unwrap_or_else(|e| e.into_inner());
-            if m.as_ref().map(|a| a.usado.elapsed() >= SOLTAR_TRAS).unwrap_or(false) {
-                *m = None;
-                crate::salud::anotar("INFO", "ia", "modelo soltado de la tarjeta (sin uso)");
+            for que in [Que::Sujeto, Que::Relleno] {
+                let mut m = abierto(que).lock().unwrap_or_else(|e| e.into_inner());
+                if m.as_ref().map(|a| a.usado.elapsed() >= SOLTAR_TRAS).unwrap_or(false) {
+                    *m = None;
+                    crate::salud::anotar("INFO", "ia", &format!("modelo de {} soltado (sin uso)", que.nombre()));
+                }
             }
         });
     });
 }
 
-/// Busca el sujeto en la foto que manda la página (RGBA en el cuerpo, medidas en las cabeceras).
-#[tauri::command]
-pub async fn ia_sujeto(request: tauri::ipc::Request<'_>) -> Result<tauri::ipc::Response, String> {
+/// La foto que manda la página: RGBA en el cuerpo, medidas en las cabeceras.
+fn foto_de(request: &tauri::ipc::Request<'_>) -> Result<(Vec<u8>, usize, usize), String> {
     let medida = |k: &str| request.headers().get(k).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
     let (ancho, alto) = (medida("x-ancho"), medida("x-alto"));
     let tauri::ipc::InvokeBody::Raw(rgba) = request.body() else {
@@ -171,7 +204,13 @@ pub async fn ia_sujeto(request: tauri::ipc::Request<'_>) -> Result<tauri::ipc::R
     if ancho < 2 || alto < 2 || ancho > 16_384 || alto > 16_384 || rgba.len() != ancho * alto * 4 {
         return Err("La foto llegó con unas medidas que no cuadran.".into());
     }
-    let rgba = rgba.clone();
+    Ok((rgba.clone(), ancho, alto))
+}
+
+/// Busca el sujeto en la foto que manda la página.
+#[tauri::command]
+pub async fn ia_sujeto(request: tauri::ipc::Request<'_>) -> Result<tauri::ipc::Response, String> {
+    let (rgba, ancho, alto) = foto_de(&request)?;
     tauri::async_runtime::spawn_blocking(move || buscar(&rgba, ancho, alto))
         .await
         .map_err(|e| format!("La IA falló: {e}"))?
@@ -179,7 +218,7 @@ pub async fn ia_sujeto(request: tauri::ipc::Request<'_>) -> Result<tauri::ipc::R
 }
 
 fn buscar(rgba: &[u8], ancho: usize, alto: usize) -> Result<Vec<u8>, String> {
-    let mut m = MODELO.lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = SUJETO.lock().unwrap_or_else(|e| e.into_inner());
     let Some(a) = m.as_mut() else {
         return Err("La IA no está preparada.".into());
     };
@@ -201,6 +240,40 @@ fn buscar(rgba: &[u8], ancho: usize, alto: usize) -> Result<Vec<u8>, String> {
     }
 }
 
+/// Rellena el hueco (el alfa) de la foto que manda la página (relleno.rs).
+#[tauri::command]
+pub async fn ia_rellenar(request: tauri::ipc::Request<'_>) -> Result<tauri::ipc::Response, String> {
+    let (rgba, ancho, alto) = foto_de(&request)?;
+    tauri::async_runtime::spawn_blocking(move || rellenar(&rgba, ancho, alto))
+        .await
+        .map_err(|e| format!("La IA falló: {e}"))?
+        .map(tauri::ipc::Response::new)
+}
+
+fn rellenar(rgba: &[u8], ancho: usize, alto: usize) -> Result<Vec<u8>, String> {
+    let mut m = RELLENO.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(a) = m.as_mut() else {
+        return Err("La IA no está preparada.".into());
+    };
+    let (mw, mh) = relleno::tamano_modelo(ancho, alto);
+    let t0 = Instant::now();
+    let r = a.motor.correr_forma(&[1, 4, mh, mw], relleno::entrada(rgba, ancho, alto, mw, mh));
+    a.usado = Instant::now();
+    match r {
+        Ok((_, planos)) if planos.len() == 3 * mw * mh => {
+            crate::salud::anotar("INFO", "ia", &format!("relleno de {ancho}×{alto} (a {mw}×{mh}) en {:.1} s", t0.elapsed().as_secs_f32()));
+            let rgb = relleno::salida(&planos, mw, mh, rgba, ancho, alto);
+            Ok(imagen::respuesta(ancho as u32, alto as u32, &rgb))
+        }
+        Ok((forma, _)) => Err(format!("El modelo contestó {forma:?} y se esperaba [1, 3, {mh}, {mw}].")),
+        Err(e) => {
+            *m = None;
+            crate::salud::anotar("ERROR", "ia", &format!("no se pudo rellenar: {e}"));
+            Err(e)
+        }
+    }
+}
+
 #[cfg(all(test, windows))]
 mod pruebas {
     use super::*;
@@ -214,7 +287,7 @@ mod pruebas {
     #[ignore]
     fn de_punta_a_punta_en_la_tarjeta() {
         let dir = PathBuf::from(std::env::var("LS_IA_DIR").expect("LS_IA_DIR"));
-        for p in piezas::todas() {
+        for p in piezas::de(Que::Sujeto) {
             let t = Instant::now();
             bajar::bajar(&dir, p, None, &mut |_| {}).unwrap();
             eprintln!("{}: listo en {:.1} s", p.nombre, t.elapsed().as_secs_f32());
@@ -257,6 +330,41 @@ mod pruebas {
                     std::fs::write(f, s.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
                 }
             }
+        }
+    }
+
+    /// Rellenar de punta a punta en ESTE equipo: LS_IA_DIR con el motor ya bajado y el modelo de
+    /// rellenar (piezas::ARCHIVO_RELLENO); unas rayas con un hueco cuadrado, al tamaño LS_IA_LADOS.
+    #[test]
+    #[ignore]
+    fn relleno_de_punta_a_punta() {
+        let dir = PathBuf::from(std::env::var("LS_IA_DIR").expect("LS_IA_DIR"));
+        let t = Instant::now();
+        let mut m = motor::Motor::abrir_en_cpu(&dir, piezas::ARCHIVO_RELLENO).unwrap();
+        eprintln!("lama abierto en {:.1} s ({})", t.elapsed().as_secs_f32(), m.donde());
+        let lados: Vec<usize> = std::env::var("LS_IA_LADOS").unwrap_or("600,1400".into()).split(',').filter_map(|v| v.trim().parse().ok()).collect();
+        for &lado in &lados {
+            let (w, h) = (lado, lado * 2 / 3);
+            let mut rgba = vec![0u8; w * h * 4];
+            for y in 0..h {
+                for x in 0..w {
+                    let i = (y * w + x) * 4;
+                    let raya: u8 = if (x / 16) % 2 == 0 { 40 } else { 0 };
+                    rgba[i] = 80 + raya;
+                    rgba[i + 1] = 120;
+                    rgba[i + 2] = 50 + raya;
+                    let hueco = x > w * 2 / 5 && x < w * 3 / 5 && y > h * 2 / 5 && y < h * 3 / 5;
+                    rgba[i + 3] = if hueco { 255 } else { 0 };
+                }
+            }
+            let (mw, mh) = relleno::tamano_modelo(w, h);
+            let t = Instant::now();
+            let (_, planos) = m.correr_forma(&[1, 4, mh, mw], relleno::entrada(&rgba, w, h, mw, mh)).unwrap();
+            let rgb = relleno::salida(&planos, mw, mh, &rgba, w, h);
+            let c = (h / 2 * w + w / 2) * 3;
+            eprintln!("{w}×{h} (a {mw}×{mh}): {:.2} s, centro {:?}, esquina {:?}", t.elapsed().as_secs_f32(), &rgb[c..c + 3], &rgb[..3]);
+            // fuera del hueco, lo que había
+            assert_eq!(&rgb[..3], &rgba[..3]);
         }
     }
 }

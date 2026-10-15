@@ -21,6 +21,7 @@
     "core:window:allow-start-dragging",
     "allow-ia-estado",
     "allow-ia-preparar",
-    "allow-ia-sujeto"
+    "allow-ia-sujeto",
+    "allow-ia-rellenar"
   ]
 }

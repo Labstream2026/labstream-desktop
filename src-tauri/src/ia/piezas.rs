@@ -1,4 +1,6 @@
-// ── Lo que la IA baja la primera vez (≈700 MB), de dónde, y con qué huella ──
+// ── Lo que la IA baja la primera vez, de dónde, y con qué huella ──
+// El motor (≈215 MB) es de las dos IA; cada modelo se baja solo cuando se usa la suya: el del sujeto
+// (≈490 MB) o el de rellenar (≈210 MB).
 //
 // Fijado por versión y huella SHA-256 (comprobadas al bajarlo el 14-oct-2026): si algún día cambia
 // lo que hay en esa dirección, no se usa.
@@ -11,6 +13,10 @@
 //   5080: 0,3 s por foto y el mismo borde que el original en la CPU.
 //   El HR (2048 px, matting) se probó y NO va: su convolución deformable, deshecha en GatherND en la
 //   exportación oficial, ocupa 14–15 GB con DirectML y tarda de 6 a 45 s (14-oct-2026).
+// - Rellenar (1.23): LaMa (Apache-2.0, advimman/big-lama), la exportación ONNX de tamaño libre de
+//   g-ronimo (Hugging Face g-ronimo/lama, `lama.onnx`, la que usa wipe.photos), copiada al servidor de
+//   la app (api/modelos/relleno-equipo). Entrada `input` [1, 4, alto, ancho] (múltiplos de 32),
+//   salida `output` [1, 3, alto, ancho], 0..1. Corre en la CPU (ver motor.rs: abrir_en_cpu).
 // - ONNX Runtime 1.24.4 con DirectML (NuGet de Microsoft): onnxruntime.dll para x64.
 // - DirectML 1.15.4 (NuGet de Microsoft): DirectML.dll para Windows x64 (el paquete trae también
 //   las de Xbox y las de depurar: se saca por su ruta exacta).
@@ -18,12 +24,46 @@
 use super::bajar::{Forma, Pieza};
 
 pub const NOMBRE_MODELO: &str = "BiRefNet";
+pub const NOMBRE_RELLENO: &str = "LaMa";
+pub const ARCHIVO_RELLENO: &str = "lama-g-ronimo-44bb92b2.onnx";
 /// El lado de la entrada y de la salida del modelo.
 pub const LADO: usize = 1024;
 
 pub const ARCHIVO_MODELO: &str = "birefnet-general-epoch_244-fp16.onnx";
 pub const DLL_ORT: &str = "onnxruntime.dll";
 pub const DLL_DIRECTML: &str = "DirectML.dll";
+
+/// De qué IA se habla: la máscara de sujeto o rellenar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Que {
+    Sujeto,
+    Relleno,
+}
+
+impl Que {
+    pub fn de(v: Option<&str>) -> Que {
+        if v == Some("relleno") {
+            Que::Relleno
+        } else {
+            Que::Sujeto
+        }
+    }
+    pub fn nombre(self) -> &'static str {
+        match self {
+            Que::Sujeto => "sujeto",
+            Que::Relleno => "relleno",
+        }
+    }
+}
+
+static RELLENO: Pieza = Pieza {
+    nombre: "lama-g-ronimo-44bb92b2",
+    url: "https://os.labstreamsas.com/api/modelos/relleno-equipo",
+    sha256: "44bb92b2693db40bb088dda226365a3aa8080a561584b8b0287ab11a97f9e9e7",
+    bytes: 209_181_361,
+    forma: Forma::Archivo(ARCHIVO_RELLENO),
+    con_sesion: true,
+};
 
 static PIEZAS: [Pieza; 3] = [
     Pieza {
@@ -52,6 +92,10 @@ static PIEZAS: [Pieza; 3] = [
     },
 ];
 
-pub fn todas() -> &'static [Pieza] {
-    &PIEZAS
+/// Lo que necesita cada IA: el motor (los dos primeros) y su modelo.
+pub fn de(que: Que) -> Vec<&'static Pieza> {
+    match que {
+        Que::Sujeto => PIEZAS.iter().collect(),
+        Que::Relleno => vec![&PIEZAS[0], &PIEZAS[1], &RELLENO],
+    }
 }

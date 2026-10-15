@@ -51,6 +51,7 @@ mod imp {
     pub struct Motor {
         sesion: Session,
         entrada: String,
+        donde: &'static str,
     }
 
     impl Motor {
@@ -86,24 +87,48 @@ mod imp {
                 .commit_from_file(dir.join(archivo))
                 .map_err(|e| format!("No se pudo abrir el modelo: {e}"))?;
             let entrada = sesion.inputs().first().map(|i| i.name().to_string()).ok_or("El modelo no tiene entrada.")?;
-            Ok(Motor { sesion, entrada })
+            Ok(Motor { sesion, entrada, donde: "DirectML" })
+        }
+
+        /// En la CPU (Rellenar: LaMa). Las exportaciones de LaMa no corren con DirectML —su FFT, sea el
+        /// operador DFT o productos de matrices, falla con 80070057 en una RTX 5080 (14-oct-2026)— y en
+        /// la CPU sí: 2,7 s a 512 px y 10 s a 1024. Y no le quita memoria a la tarjeta (Resolve).
+        pub fn abrir_en_cpu(dir: &Path, archivo: &str) -> Result<Motor, String> {
+            let env = entorno(dir)?;
+            let e = |e: ort::Error<ort::session::builder::SessionBuilder>| format!("No se pudo abrir el modelo: {e}");
+            let sesion = Session::builder(env)
+                .map_err(|e| format!("No se pudo abrir el modelo: {e}"))?
+                .with_optimization_level(GraphOptimizationLevel::Level3)
+                .map_err(e)?
+                .with_execution_providers([ep::CPU::default().build()])
+                .map_err(e)?
+                .commit_from_file(dir.join(archivo))
+                .map_err(|e| format!("No se pudo abrir el modelo: {e}"))?;
+            let entrada = sesion.inputs().first().map(|i| i.name().to_string()).ok_or("El modelo no tiene entrada.")?;
+            Ok(Motor { sesion, entrada, donde: "CPU" })
         }
 
         pub fn donde(&self) -> &'static str {
-            "DirectML"
+            self.donde
         }
 
         /// La entrada [1, 3, lado, lado] → la salida [1, 1, lado, lado] (la última, si hay varias).
         pub fn correr(&mut self, entrada: Vec<f32>, lado: usize) -> Result<Vec<f32>, String> {
-            let t = Tensor::from_array(([1usize, 3, lado, lado], entrada)).map_err(|e| format!("La foto no entró al modelo: {e}"))?;
-            let nombre = self.entrada.clone();
-            let salidas = self.sesion.run(ort::inputs![nombre => t]).map_err(|e| format!("La tarjeta no pudo buscar el sujeto: {e}"))?;
-            let ultima = salidas.len().checked_sub(1).ok_or("El modelo no contestó.")?;
-            let (forma, datos) = salidas[ultima].try_extract_tensor::<f32>().map_err(|e| format!("El modelo contestó algo raro: {e}"))?;
+            let (forma, datos) = self.correr_forma(&[1, 3, lado, lado], entrada)?;
             if datos.len() != lado * lado {
                 return Err(format!("El modelo contestó {forma:?} y se esperaba {lado} × {lado}."));
             }
-            Ok(datos.to_vec())
+            Ok(datos)
+        }
+
+        /// Su única entrada con esta forma → la última salida (su forma y sus datos).
+        pub fn correr_forma(&mut self, forma: &[usize], entrada: Vec<f32>) -> Result<(Vec<i64>, Vec<f32>), String> {
+            let t = Tensor::from_array((forma.to_vec(), entrada)).map_err(|e| format!("La foto no entró al modelo: {e}"))?;
+            let nombre = self.entrada.clone();
+            let salidas = self.sesion.run(ort::inputs![nombre => t]).map_err(|e| format!("La tarjeta no pudo con la foto: {e}"))?;
+            let ultima = salidas.len().checked_sub(1).ok_or("El modelo no contestó.")?;
+            let (forma, datos) = salidas[ultima].try_extract_tensor::<f32>().map_err(|e| format!("El modelo contestó algo raro: {e}"))?;
+            Ok((forma.iter().copied().collect(), datos.to_vec()))
         }
     }
 }
@@ -118,10 +143,16 @@ mod imp {
         pub fn abrir(_dir: &Path) -> Result<Motor, String> {
             Err("La IA del equipo es para Windows con tarjeta NVIDIA.".into())
         }
+        pub fn abrir_en_cpu(_dir: &Path, _archivo: &str) -> Result<Motor, String> {
+            Err("La IA del equipo es para Windows.".into())
+        }
         pub fn donde(&self) -> &'static str {
             "-"
         }
         pub fn correr(&mut self, _entrada: Vec<f32>, _lado: usize) -> Result<Vec<f32>, String> {
+            Err("La IA del equipo es para Windows con tarjeta NVIDIA.".into())
+        }
+        pub fn correr_forma(&mut self, _forma: &[usize], _entrada: Vec<f32>) -> Result<(Vec<i64>, Vec<f32>), String> {
             Err("La IA del equipo es para Windows con tarjeta NVIDIA.".into())
         }
     }

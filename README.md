@@ -36,6 +36,13 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   (`build.rs` + `capabilities/default.json`). El modelo se suelta de la tarjeta a los
   2 min sin uso. Prueba de punta a punta en la tarjeta del equipo:
   `LS_IA_DIR=<carpeta> cargo test --lib de_punta_a_punta -- --ignored --nocapture`.
+- **Rellenar** (v1.23.0, Windows): en Eliminar del editor de revelado, lo pintado lo
+  rellena LaMa (`src-tauri/src/ia/relleno.rs`, comando `ia_rellenar`) con lo que debería
+  haber detrás; la página lo guarda como un parche de la foto. Corre en la CPU (LaMa no
+  corre con DirectML: su FFT falla en la tarjeta): ~3 s a 512 px, ~10 s a 1024 (el tope).
+  La primera vez baja el motor (si no estaba) y el modelo (≈210 MB, del servidor de la
+  app con la sesión de la pestaña, fijado por huella). `ia_estado` / `ia_preparar` llevan
+  `{ que: "relleno" }`; sin él, hablan del sujeto (como la 1.22).
 - **Pestañas con nombre** (v1.21.0): `window.open(url, "ls-…")` o un enlace con
   `target="ls-…"` abre la pestaña la primera vez y las siguientes **vuelven a
   ella** en vez de abrir otra. La página recibe la URL nueva por
