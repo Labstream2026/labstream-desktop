@@ -93,6 +93,8 @@ mod imp {
         /// En la CPU (Rellenar: LaMa). Las exportaciones de LaMa no corren con DirectML —su FFT, sea el
         /// operador DFT o productos de matrices, falla con 80070057 en una RTX 5080 (14-oct-2026)— y en
         /// la CPU sí: 2,7 s a 512 px y 10 s a 1024. Y no le quita memoria a la tarjeta (Resolve).
+        /// (Sin uso desde la 1.27: lo usaba LaMa. Se queda para un modelo que no corra con DirectML.)
+        #[allow(dead_code)]
         pub fn abrir_en_cpu(dir: &Path, archivo: &str) -> Result<Motor, String> {
             let env = entorno(dir)?;
             let e = |e: ort::Error<ort::session::builder::SessionBuilder>| format!("No se pudo abrir el modelo: {e}");

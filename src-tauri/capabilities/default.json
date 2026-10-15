@@ -22,6 +22,6 @@
     "allow-ia-estado",
     "allow-ia-preparar",
     "allow-ia-sujeto",
-    "allow-ia-rellenar"
+    "allow-ia-generar"
   ]
 }

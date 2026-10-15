@@ -1833,7 +1833,7 @@ pub fn run() {
         // builder para que TODAS las webviews de pestaña puedan usarlo.
         .register_asynchronous_uri_scheme_protocol("lsthumb", responder_lsthumb)
         // La IA del equipo (src/ia): la máscara de sujeto con la tarjeta NVIDIA, para la página.
-        .invoke_handler(tauri::generate_handler![ia::ia_estado, ia::ia_preparar, ia::ia_sujeto, ia::ia_rellenar]);
+        .invoke_handler(tauri::generate_handler![ia::ia_estado, ia::ia_preparar, ia::ia_sujeto, ia::ia_generar]);
 
     let app = builder
         .manage(ShellState::default())
@@ -2418,6 +2418,7 @@ pub fn run() {
         }
         // Salida limpia: sin esto, el próximo arranque anotaría un «cierre de golpe».
         if let tauri::RunEvent::Exit = event {
+            ia::apagar();
             salud::salida_limpia();
         }
         let _ = app;

@@ -1,6 +1,6 @@
 [package]
 name = "labstream-desktop"
-version = "1.26.0"
+version = "1.27.0"
 description = "Cliente de escritorio de Labstream OS"
 authors = ["Labstream SAS"]
 edition = "2021"
@@ -53,6 +53,8 @@ gethostname = "0.5"
 # sha2: la huella de lo que se baja (modelo y motor); zip: sacar las DLL del paquete del motor.
 sha2 = "0.10"
 zip = { version = "4", default-features = false, features = ["deflate"] }
+# base64: los píxeles van y vienen del motor generativo (un proceso aparte) en JSON.
+base64 = "0.22"
 
 # device_query solo en Windows/Linux: la huella de entrada (posición del mouse + cuántas teclas
 # hay presionadas). En macOS NO se usa —leer el teclado global dispara el permiso de

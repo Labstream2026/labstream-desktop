@@ -4,8 +4,9 @@
 // conecta y sube el resultado a la app». En el editor de revelado (modo edición de un set):
 // - «Sujeto» y «Fondo» los busca esta app: ONNX Runtime con DirectML sobre la tarjeta NVIDIA y
 //   BiRefNet en media precisión (piezas.rs): 0,3 s por foto en vez de 2,5–3 s en el navegador.
-// - «Rellenar» (Eliminar con IA): LaMa rellena lo pintado (relleno.rs), en la CPU (motor.rs:
-//   abrir_en_cpu; LaMa no corre con DirectML).
+// - «Rellenar con IA» (1.27): SDXL Inpainting en la tarjeta, en un proceso aparte (generativo.rs):
+//   crea lo que se pide con una frase dentro de lo pintado, o quita lo pintado. (La 1.23–1.26
+//   rellenaba con LaMa en la CPU; ya no.)
 //
 // La página (lib/revelado/ia-local en labstream-os) llama a cuatro comandos, permitidos SOLO para el
 // origen de la app (capabilities/default.json + el manifiesto de build.rs):
@@ -14,10 +15,11 @@
 //                           y abre el modelo
 //   ia_sujeto   ← RGBA en el cuerpo (binario) + x-ancho / x-alto
 //               → [ancho u32][alto u32][un byte por punto] (lib/revelado/ia-local: leerRespuesta)
-//   ia_rellenar ← RGBA con el hueco en el alfa + x-ancho / x-alto
-//               → [ancho u32][alto u32][RGB, 3 bytes por punto]
-// `que` es "sujeto" (o nada: la página de la 1.22) o "relleno". El resultado vuelve a la página, que lo
-// pone en la máscara o en un parche de la foto y lo guarda con su revelado.
+//   ia_generar  ← RGBA con el hueco en el alfa + x-ancho / x-alto / x-frase (codificada como en
+//                 una URL) / x-n / x-pasos / x-semilla
+//               → [n u32][ancho u32][alto u32][semilla u64][RGB de cada propuesta, 3 bytes por punto]
+// `que` es "sujeto" (o nada: la página de la 1.22) o "generativo". El resultado vuelve a la página,
+// que lo pone en la máscara o en un parche de la foto y lo guarda con su revelado.
 //
 // Nada se baja ni se carga al arrancar la app: solo cuando alguien lo pide. Lo bajado vive en los
 // datos de la app del equipo (`carpeta`), comprobado con su huella (bajar.rs). Cada modelo abierto
@@ -25,10 +27,10 @@
 // se suelta a los SOLTAR_TRAS sin usarlo, que los editores trabajan con Resolve abierto.
 
 mod bajar;
+mod generativo;
 mod imagen;
 mod motor;
 mod piezas;
-mod relleno;
 mod tarjeta;
 
 use piezas::Que;
@@ -38,7 +40,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, Runtime, Webview};
 
-/// Sin usarlo este rato, el modelo se suelta (de la tarjeta, o de la memoria el de rellenar).
+/// Sin usarlo este rato, el modelo del sujeto se suelta de la tarjeta (el generativo se suelta él solo).
 const SOLTAR_TRAS: Duration = Duration::from_secs(2 * 60);
 
 struct Abierto {
@@ -46,19 +48,11 @@ struct Abierto {
     usado: Instant,
 }
 
-/// El modelo abierto de cada IA: el del sujeto (DirectML) y el de rellenar (CPU).
+/// El modelo del sujeto abierto (DirectML).
 static SUJETO: Mutex<Option<Abierto>> = Mutex::new(None);
-static RELLENO: Mutex<Option<Abierto>> = Mutex::new(None);
 /// Una preparación a la vez (dos pestañas que piden a la vez no bajan dos veces).
 static PREPARANDO: Mutex<()> = Mutex::new(());
 static VIGILANTE: std::sync::Once = std::sync::Once::new();
-
-fn abierto(que: Que) -> &'static Mutex<Option<Abierto>> {
-    match que {
-        Que::Sujeto => &SUJETO,
-        Que::Relleno => &RELLENO,
-    }
-}
 
 fn carpeta<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     app.path().app_local_data_dir().map(|d| d.join("ia")).map_err(|e| format!("No hay carpeta de datos de la app: {e}"))
@@ -72,6 +66,8 @@ fn faltan(dir: &std::path::Path, que: Que) -> u64 {
 pub struct Estado {
     /// de qué IA habla (así la página sabe que esta app conoce Rellenar)
     que: &'static str,
+    /// la página pidió una IA que esta app no conoce (p. ej. "relleno", el LaMa de antes)
+    desconocida: bool,
     disponible: bool,
     motivo: Option<String>,
     listo: bool,
@@ -80,11 +76,11 @@ pub struct Estado {
     tarjeta: Option<String>,
 }
 
-/// Por qué esta IA no puede correr aquí (None: sí puede). El sujeto pide NVIDIA; rellenar va en la CPU.
-fn motivo(que: Que, tarjeta: Option<&tarjeta::Tarjeta>) -> Option<String> {
+/// Por qué esta IA no puede correr aquí (None: sí puede). Las dos piden Windows con NVIDIA.
+fn motivo(_que: Que, tarjeta: Option<&tarjeta::Tarjeta>) -> Option<String> {
     if !cfg!(all(windows, target_arch = "x86_64")) {
         Some("La IA del equipo es para la app de Windows.".to_string())
-    } else if que == Que::Sujeto && tarjeta.is_none() {
+    } else if tarjeta.is_none() {
         Some("Este equipo no tiene tarjeta NVIDIA.".to_string())
     } else {
         None
@@ -93,20 +89,23 @@ fn motivo(que: Que, tarjeta: Option<&tarjeta::Tarjeta>) -> Option<String> {
 
 #[tauri::command]
 pub fn ia_estado<R: Runtime>(app: AppHandle<R>, que: Option<String>) -> Estado {
-    let que = Que::de(que.as_deref());
     let t = tarjeta::nvidia();
+    let Some(que) = Que::de(que.as_deref()) else {
+        return Estado { que: "", desconocida: true, disponible: false, motivo: Some("Esta app no tiene esa IA.".into()), listo: false, faltan: 0, modelo: "", tarjeta: t.map(|t| t.nombre) };
+    };
     let motivo = motivo(que, t.as_ref());
     let dir = carpeta(&app).ok();
     let falta = dir.as_deref().map(|d| faltan(d, que)).unwrap_or(u64::MAX);
     Estado {
         que: que.nombre(),
+        desconocida: false,
         disponible: motivo.is_none() && dir.is_some(),
         motivo,
         listo: falta == 0,
         faltan: if falta == u64::MAX { 0 } else { falta },
         modelo: match que {
             Que::Sujeto => piezas::NOMBRE_MODELO,
-            Que::Relleno => piezas::NOMBRE_RELLENO,
+            Que::Generativo => piezas::NOMBRE_RELLENO,
         },
         tarjeta: t.map(|t| t.nombre),
     }
@@ -119,7 +118,7 @@ fn avisar<R: Runtime>(app: &AppHandle<R>, label: &str, fase: &str, parte: f64) {
 /// Baja lo que falte y deja el modelo abierto (en un hilo aparte: puede tardar minutos).
 #[tauri::command]
 pub async fn ia_preparar<R: Runtime>(app: AppHandle<R>, webview: Webview<R>, que: Option<String>) -> Result<(), String> {
-    let que = Que::de(que.as_deref());
+    let que = Que::de(que.as_deref()).ok_or("Esta app no tiene esa IA.")?;
     let label = webview.label().to_string();
     // La sesión de la pestaña, para bajar el modelo del servidor de la app (solo viaja a él). Aquí y
     // no en el hilo de abajo: leer cookies de WebView2 desde un comando síncrono se queda colgado.
@@ -144,14 +143,21 @@ fn preparar<R: Runtime>(app: &AppHandle<R>, label: &str, sesion: Option<&str>, q
         let mut ultimo = 0u64;
         avisar(app, label, "bajando", 0.0);
         for p in piezas::de(que) {
-            bajar::bajar(&dir, p, sesion, &mut |n| {
-                let h = hecho.fetch_add(n, Ordering::Relaxed) + n;
-                // un aviso cada ~1 %
-                if h - ultimo > total / 100 {
-                    ultimo = h;
-                    avisar(app, label, "bajando", (h as f64 / total as f64).min(1.0));
-                }
-            })
+            bajar::bajar_con(
+                &dir,
+                p,
+                sesion,
+                &mut |n| {
+                    let h = hecho.fetch_add(n, Ordering::Relaxed) + n;
+                    // un aviso cada ~1 %
+                    if h - ultimo > total / 100 {
+                        ultimo = h;
+                        avisar(app, label, "bajando", (h as f64 / total as f64).min(1.0));
+                    }
+                },
+                // sacar un zip de miles de archivos (el motor, el modelo) también tarda
+                &mut |parte| avisar(app, label, "preparando", parte),
+            )
             .map_err(|e| {
                 crate::salud::anotar("ERROR", "ia", &e);
                 e
@@ -159,15 +165,20 @@ fn preparar<R: Runtime>(app: &AppHandle<R>, label: &str, sesion: Option<&str>, q
         }
         crate::salud::anotar("INFO", "ia", &format!("IA de {} bajada al equipo ({} MB)", que.nombre(), total / 1_000_000));
     }
-    let mut m = abierto(que).lock().unwrap_or_else(|e| e.into_inner());
+    if que == Que::Generativo {
+        generativo::limpiar_lama(&dir);
+        avisar(app, label, "preparando", 0.0);
+        generativo::arrancar(&dir).map_err(|e| {
+            crate::salud::anotar("ERROR", "ia", &format!("no se pudo arrancar el motor generativo: {e}"));
+            e
+        })?;
+        return Ok(());
+    }
+    let mut m = SUJETO.lock().unwrap_or_else(|e| e.into_inner());
     if m.is_none() {
         avisar(app, label, "preparando", 0.0);
         let t0 = Instant::now();
-        let motor = match que {
-            Que::Sujeto => motor::Motor::abrir(&dir),
-            Que::Relleno => motor::Motor::abrir_en_cpu(&dir, piezas::ARCHIVO_RELLENO),
-        }
-        .map_err(|e| {
+        let motor = motor::Motor::abrir(&dir).map_err(|e| {
             crate::salud::anotar("ERROR", "ia", &format!("no se pudo abrir el modelo de {}: {e}", que.nombre()));
             e
         })?;
@@ -178,20 +189,23 @@ fn preparar<R: Runtime>(app: &AppHandle<R>, label: &str, sesion: Option<&str>, q
     Ok(())
 }
 
-/// Suelta cada modelo cuando lleva SOLTAR_TRAS sin usarse.
+/// Suelta el modelo del sujeto cuando lleva SOLTAR_TRAS sin usarse.
 fn vigilar() {
     VIGILANTE.call_once(|| {
         std::thread::spawn(|| loop {
             std::thread::sleep(Duration::from_secs(15));
-            for que in [Que::Sujeto, Que::Relleno] {
-                let mut m = abierto(que).lock().unwrap_or_else(|e| e.into_inner());
-                if m.as_ref().map(|a| a.usado.elapsed() >= SOLTAR_TRAS).unwrap_or(false) {
-                    *m = None;
-                    crate::salud::anotar("INFO", "ia", &format!("modelo de {} soltado (sin uso)", que.nombre()));
-                }
+            let mut m = SUJETO.lock().unwrap_or_else(|e| e.into_inner());
+            if m.as_ref().map(|a| a.usado.elapsed() >= SOLTAR_TRAS).unwrap_or(false) {
+                *m = None;
+                crate::salud::anotar("INFO", "ia", "modelo de sujeto soltado (sin uso)");
             }
         });
     });
+}
+
+/// Al salir de la app: el motor generativo se apaga.
+pub fn apagar() {
+    generativo::apagar();
 }
 
 /// La foto que manda la página: RGBA en el cuerpo, medidas en las cabeceras.
@@ -240,40 +254,36 @@ fn buscar(rgba: &[u8], ancho: usize, alto: usize) -> Result<Vec<u8>, String> {
     }
 }
 
-/// Rellena el hueco (el alfa) de la foto que manda la página (relleno.rs).
-#[tauri::command]
-pub async fn ia_rellenar(request: tauri::ipc::Request<'_>) -> Result<tauri::ipc::Response, String> {
-    let (rgba, ancho, alto) = foto_de(&request)?;
-    // «Calidad alta» (1.26): hasta 2048 px en los huecos grandes (más nítido, mucho más lento).
-    let alta = request.headers().get("x-calidad").and_then(|v| v.to_str().ok()) == Some("alta");
-    tauri::async_runtime::spawn_blocking(move || rellenar(&rgba, ancho, alto, alta))
-        .await
-        .map_err(|e| format!("La IA falló: {e}"))?
-        .map(tauri::ipc::Response::new)
+/// Una cabecera de texto de la página, codificada como en una URL (la frase, con tildes).
+fn texto_de(request: &tauri::ipc::Request<'_>, k: &str) -> String {
+    let v = request.headers().get(k).and_then(|v| v.to_str().ok()).unwrap_or("");
+    percent_encoding::percent_decode_str(v).decode_utf8_lossy().chars().take(600).collect()
 }
 
-fn rellenar(rgba: &[u8], ancho: usize, alto: usize, alta: bool) -> Result<Vec<u8>, String> {
-    let mut m = RELLENO.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(a) = m.as_mut() else {
-        return Err("La IA no está preparada.".into());
-    };
-    let p = relleno::plan(ancho, alto, alta);
-    let t0 = Instant::now();
-    let r = a.motor.correr_forma(&[1, 4, p.ph, p.pw], relleno::entrada(rgba, ancho, alto, p));
-    a.usado = Instant::now();
-    match r {
-        Ok((_, planos)) if planos.len() == 3 * p.pw * p.ph => {
-            crate::salud::anotar("INFO", "ia", &format!("relleno de {ancho}×{alto} (a {}×{} en {}×{}) en {:.1} s", p.sw, p.sh, p.pw, p.ph, t0.elapsed().as_secs_f32()));
-            let rgb = relleno::salida(&planos, p, rgba, ancho, alto);
-            Ok(imagen::respuesta(ancho as u32, alto as u32, &rgb))
+/// Rellena lo pintado (el alfa) con el motor generativo: `n` propuestas (generativo.rs).
+#[tauri::command]
+pub async fn ia_generar<R: Runtime>(app: AppHandle<R>, request: tauri::ipc::Request<'_>) -> Result<tauri::ipc::Response, String> {
+    let (rgba, ancho, alto) = foto_de(&request)?;
+    let numero = |k: &str, d: u64| request.headers().get(k).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()).unwrap_or(d);
+    let pedido = (texto_de(&request, "x-frase"), numero("x-n", 2).clamp(1, 4) as u8, numero("x-pasos", 24).clamp(10, 40) as u8, request.headers().get("x-semilla").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()));
+    let dir = carpeta(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (frase, n, pasos, semilla) = pedido;
+        let (propuestas, semilla) = generativo::rellenar(&dir, &generativo::Pedido { rgba: &rgba, ancho, alto, frase, n, pasos, semilla })?;
+        // [n u32][ancho u32][alto u32][semilla u64][RGB…]
+        let mut out = Vec::with_capacity(20 + propuestas.len() * ancho * alto * 3);
+        out.extend_from_slice(&(propuestas.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(ancho as u32).to_le_bytes());
+        out.extend_from_slice(&(alto as u32).to_le_bytes());
+        out.extend_from_slice(&semilla.to_le_bytes());
+        for p in &propuestas {
+            out.extend_from_slice(p);
         }
-        Ok((forma, _)) => Err(format!("El modelo contestó {forma:?} y se esperaba [1, 3, {}, {}].", p.ph, p.pw)),
-        Err(e) => {
-            *m = None;
-            crate::salud::anotar("ERROR", "ia", &format!("no se pudo rellenar: {e}"));
-            Err(e)
-        }
-    }
+        Ok::<Vec<u8>, String>(out)
+    })
+    .await
+    .map_err(|e| format!("La IA falló: {e}"))?
+    .map(tauri::ipc::Response::new)
 }
 
 #[cfg(all(test, windows))]
@@ -335,38 +345,4 @@ mod pruebas {
         }
     }
 
-    /// Rellenar de punta a punta en ESTE equipo: LS_IA_DIR con el motor ya bajado y el modelo de
-    /// rellenar (piezas::ARCHIVO_RELLENO); unas rayas con un hueco cuadrado, al tamaño LS_IA_LADOS.
-    #[test]
-    #[ignore]
-    fn relleno_de_punta_a_punta() {
-        let dir = PathBuf::from(std::env::var("LS_IA_DIR").expect("LS_IA_DIR"));
-        let t = Instant::now();
-        let mut m = motor::Motor::abrir_en_cpu(&dir, piezas::ARCHIVO_RELLENO).unwrap();
-        eprintln!("lama abierto en {:.1} s ({})", t.elapsed().as_secs_f32(), m.donde());
-        let lados: Vec<usize> = std::env::var("LS_IA_LADOS").unwrap_or("600,1400".into()).split(',').filter_map(|v| v.trim().parse().ok()).collect();
-        for &lado in &lados {
-            let (w, h) = (lado, lado * 2 / 3);
-            let mut rgba = vec![0u8; w * h * 4];
-            for y in 0..h {
-                for x in 0..w {
-                    let i = (y * w + x) * 4;
-                    let raya: u8 = if (x / 16) % 2 == 0 { 40 } else { 0 };
-                    rgba[i] = 80 + raya;
-                    rgba[i + 1] = 120;
-                    rgba[i + 2] = 50 + raya;
-                    let hueco = x > w * 2 / 5 && x < w * 3 / 5 && y > h * 2 / 5 && y < h * 3 / 5;
-                    rgba[i + 3] = if hueco { 255 } else { 0 };
-                }
-            }
-            let p = relleno::plan(w, h, std::env::var("LS_IA_ALTA").is_ok());
-            let t = Instant::now();
-            let (_, planos) = m.correr_forma(&[1, 4, p.ph, p.pw], relleno::entrada(&rgba, w, h, p)).unwrap();
-            let rgb = relleno::salida(&planos, p, &rgba, w, h);
-            let c = (h / 2 * w + w / 2) * 3;
-            eprintln!("{w}×{h} ({p:?}): {:.2} s, centro {:?}, esquina {:?}", t.elapsed().as_secs_f32(), &rgb[c..c + 3], &rgb[..3]);
-            // fuera del hueco, lo que había
-            assert_eq!(&rgb[..3], &rgba[..3]);
-        }
-    }
 }

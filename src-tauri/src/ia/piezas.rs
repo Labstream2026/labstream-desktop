@@ -13,10 +13,10 @@
 //   5080: 0,3 s por foto y el mismo borde que el original en la CPU.
 //   El HR (2048 px, matting) se probó y NO va: su convolución deformable, deshecha en GatherND en la
 //   exportación oficial, ocupa 14–15 GB con DirectML y tarda de 6 a 45 s (14-oct-2026).
-// - Rellenar (1.23): LaMa (Apache-2.0, advimman/big-lama), la exportación ONNX de tamaño libre de
-//   g-ronimo (Hugging Face g-ronimo/lama, `lama.onnx`, la que usa wipe.photos), copiada al servidor de
-//   la app (api/modelos/relleno-equipo). Entrada `input` [1, 4, alto, ancho] (múltiplos de 32),
-//   salida `output` [1, 3, alto, ancho], 0..1. Corre en la CPU (ver motor.rs: abrir_en_cpu).
+// - Rellenar (1.27): el MOTOR GENERATIVO (Python 3.12 embebido + PyTorch CUDA 12.8 + diffusers,
+//   3 GB; generativo.rs) y el modelo SDXL Inpainting 0.1 de diffusers en fp16 (6,9 GB; licencia
+//   CreativeML OpenRAIL++), los dos del servidor de la app (api/modelos/equipo/<archivo>), zips
+//   enteros a su carpeta. Antes (1.23–1.26) era LaMa en la CPU: se borra del equipo (generativo.rs).
 // - ONNX Runtime 1.24.4 con DirectML (NuGet de Microsoft): onnxruntime.dll para x64.
 // - DirectML 1.15.4 (NuGet de Microsoft): DirectML.dll para Windows x64 (el paquete trae también
 //   las de Xbox y las de depurar: se saca por su ruta exacta).
@@ -24,8 +24,7 @@
 use super::bajar::{Forma, Pieza};
 
 pub const NOMBRE_MODELO: &str = "BiRefNet";
-pub const NOMBRE_RELLENO: &str = "LaMa";
-pub const ARCHIVO_RELLENO: &str = "lama-g-ronimo-44bb92b2.onnx";
+pub const NOMBRE_RELLENO: &str = "SDXL Inpainting";
 /// El lado de la entrada y de la salida del modelo.
 pub const LADO: usize = 1024;
 
@@ -33,37 +32,48 @@ pub const ARCHIVO_MODELO: &str = "birefnet-general-epoch_244-fp16.onnx";
 pub const DLL_ORT: &str = "onnxruntime.dll";
 pub const DLL_DIRECTML: &str = "DirectML.dll";
 
-/// De qué IA se habla: la máscara de sujeto o rellenar.
+/// De qué IA se habla: la máscara de sujeto o el generativo (Rellenar con IA).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Que {
     Sujeto,
-    Relleno,
+    Generativo,
 }
 
 impl Que {
-    pub fn de(v: Option<&str>) -> Que {
-        if v == Some("relleno") {
-            Que::Relleno
-        } else {
-            Que::Sujeto
+    /// `que` de la página: "sujeto" (o nada), o "generativo". ("relleno", el LaMa de la 1.23–1.26, ya no existe.)
+    pub fn de(v: Option<&str>) -> Option<Que> {
+        match v {
+            None | Some("sujeto") => Some(Que::Sujeto),
+            Some("generativo") => Some(Que::Generativo),
+            _ => None,
         }
     }
     pub fn nombre(self) -> &'static str {
         match self {
             Que::Sujeto => "sujeto",
-            Que::Relleno => "relleno",
+            Que::Generativo => "generativo",
         }
     }
 }
 
-static RELLENO: Pieza = Pieza {
-    nombre: "lama-g-ronimo-44bb92b2",
-    url: "https://os.labstreamsas.com/api/modelos/relleno-equipo",
-    sha256: "44bb92b2693db40bb088dda226365a3aa8080a561584b8b0287ab11a97f9e9e7",
-    bytes: 209_181_361,
-    forma: Forma::Archivo(ARCHIVO_RELLENO),
-    con_sesion: true,
-};
+static GENERATIVO: [Pieza; 2] = [
+    Pieza {
+        nombre: "motor-generativo-1",
+        url: "https://os.labstreamsas.com/api/modelos/equipo/motor-generativo-1-win-x64.zip",
+        sha256: "4ab6136ef6289c81f55ec41a82eafe196d486aa2a1a65feea31b36a05a36faea",
+        bytes: 2_957_377_300,
+        forma: Forma::Carpeta(super::generativo::CARPETA_MOTOR),
+        con_sesion: true,
+    },
+    Pieza {
+        nombre: "sdxl-inpainting-0.1-fp16",
+        url: "https://os.labstreamsas.com/api/modelos/equipo/sdxl-inpainting-0.1-fp16.zip",
+        sha256: "6d1c1aa80a17009404bf8bfdcddd340dfa17297419aabec3f031666657dc6dc7",
+        bytes: 6_941_221_477,
+        forma: Forma::Carpeta(super::generativo::CARPETA_MODELO),
+        con_sesion: true,
+    },
+];
 
 static PIEZAS: [Pieza; 3] = [
     Pieza {
@@ -92,10 +102,10 @@ static PIEZAS: [Pieza; 3] = [
     },
 ];
 
-/// Lo que necesita cada IA: el motor (los dos primeros) y su modelo.
+/// Lo que necesita cada IA: el sujeto, ONNX Runtime + DirectML + su modelo; el generativo, su motor y su modelo.
 pub fn de(que: Que) -> Vec<&'static Pieza> {
     match que {
         Que::Sujeto => PIEZAS.iter().collect(),
-        Que::Relleno => vec![&PIEZAS[0], &PIEZAS[1], &RELLENO],
+        Que::Generativo => GENERATIVO.iter().collect(),
     }
 }
