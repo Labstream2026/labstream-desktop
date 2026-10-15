@@ -704,6 +704,8 @@ fn broadcast<R: Runtime>(app: &AppHandle<R>) {
             "tabs": tabs,
             "zoom": (ZOOM_STEPS[s.zoom_idx.min(ZOOM_STEPS.len()-1)] * 100.0).round() as u32,
             "version": app.package_info().version.to_string(),
+            // La versión nueva que ya está publicada y espera a que se pulse «Actualizar» (o null).
+            "actualizacion": version_pendiente(),
             // En macOS la barra ocupa la fila del título (ventana con título en overlay) y
             // debe dejar libre el hueco del semáforo, que lo pinta el sistema.
             "mac": cfg!(target_os = "macos"),
@@ -1557,6 +1559,47 @@ fn show_main<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+// ── La versión nueva, también con la app abierta todo el día (1.24, 14-oct-2026) ──
+// Al abrir, la app busca versión nueva y, si hay, la instala y se reinicia (antes de que nadie
+// trabaje). Pero solo al abrir: un equipo que deja la app abierta de la mañana a la noche se
+// quedaba en la versión de la mañana (este PC seguía en la 1.20 con la 1.23 publicada, y Rellenar
+// con IA no le llegaba). Ahora, cada hora, mira si hay una nueva SIN instalarla —reiniciar en
+// medio del trabajo perdería lo que no se guardó en una página—: la barra cambia la versión por
+// «Actualizar a vX» (el mismo botón de siempre: instala y reinicia, y las pestañas vuelven) y
+// avisa una vez por versión.
+const BUSCAR_CADA: Duration = Duration::from_secs(60 * 60);
+static PENDIENTE: Mutex<Option<String>> = Mutex::new(None);
+
+fn version_pendiente() -> Option<String> {
+    PENDIENTE.lock().ok().and_then(|p| p.clone())
+}
+
+#[cfg(desktop)]
+async fn buscar_sin_instalar(handle: tauri::AppHandle) {
+    use tauri_plugin_updater::UpdaterExt;
+    let Ok(updater) = handle.updater() else { return };
+    let nueva = match updater.check().await {
+        Ok(Some(u)) => u.version,
+        Ok(None) => return,
+        Err(e) => {
+            salud::anotar("AVISO", "actualizacion", &format!("no se pudo comprobar: {e}"));
+            return;
+        }
+    };
+    let ya = PENDIENTE.lock().map(|mut p| p.replace(nueva.clone())).unwrap_or(None);
+    if ya.as_deref() == Some(nueva.as_str()) {
+        return;
+    }
+    salud::anotar("INFO", "actualizacion", &format!("hay versión nueva ({nueva}): espera a que se pulse «Actualizar»"));
+    broadcast(&handle);
+    let _ = handle
+        .notification()
+        .builder()
+        .title("Labstream OS")
+        .body(format!("Hay una versión nueva ({nueva}). Pulsa «Actualizar» en la barra de pestañas: la app se reinicia y vuelve a abrir tus pestañas."))
+        .show();
+}
+
 // Busca e instala una actualización en segundo plano. Si instala, avisa y reinicia.
 #[cfg(desktop)]
 async fn check_update(handle: tauri::AppHandle) {
@@ -1724,6 +1767,15 @@ pub fn run() {
             {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(check_update(handle));
+            }
+            // Y después, cada hora, sin instalarla: la barra ofrece «Actualizar» (ver PENDIENTE).
+            #[cfg(desktop)]
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(BUSCAR_CADA);
+                    tauri::async_runtime::block_on(buscar_sin_instalar(handle.clone()));
+                });
             }
 
             {

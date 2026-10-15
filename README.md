@@ -280,6 +280,12 @@ guardada como secret del repo (`TAURI_SIGNING_PRIVATE_KEY`). También se puede f
 la comprobación con clic en la versión de la barra, o desde el menú ⋮ ▸ *Buscar
 actualización…*.
 
+Al **abrir**, la app busca versión nueva y, si la hay, la instala y se reinicia sola. Con la
+app **abierta** (desde la 1.24) mira cada hora sin instalar nada: si hay una nueva, la versión
+de la barra pasa a **«Actualizar a vX»** (en el color de la marca) y avisa una vez. Al pulsarlo
+instala, se reinicia y vuelve a abrir las pestañas. No se reinicia sola en medio del trabajo:
+se perdería lo que una página no hubiera guardado.
+
 > ⚠️ De ahí se sigue algo que conviene tener presente: **un commit en `main` no le
 > llega a nadie**. Mientras no exista la etiqueta `vX.Y.Z`, el CI no construye nada y
 > el updater no ve versión nueva. Y al revés: publicar una etiqueta **actualiza la app

@@ -333,6 +333,14 @@
         border-radius: 13px;
       }
       #version:hover { color: var(--accent); }
+      /* Hay una versión nueva publicada: el botón la ofrece (clic: instala y reinicia). */
+      #version.nueva {
+        color: #fff;
+        background: var(--accent);
+        font-weight: 600;
+        padding: 0 10px;
+      }
+      #version.nueva:hover { color: #fff; filter: brightness(1.1); }
       /* ── Botones de ventana ──────────────────────────────────────────────────────────
          Solo en Windows: allí la ventana va SIN decoración, así que esta barra es la fila
          del título (como Chrome) y el aspa del sistema no existe. Medidas y colores del
@@ -595,7 +603,13 @@
 
         $pct.textContent = estado.zoom + "%";
         $pct.classList.toggle("activo", estado.zoom !== 100);
-        $ver.textContent = estado.version ? "v" + estado.version : "";
+        // Con una versión nueva esperando, el botón la ofrece; si no, la versión de ahora.
+        const nueva = estado.actualizacion || null;
+        $ver.textContent = nueva ? "Actualizar a v" + nueva : estado.version ? "v" + estado.version : "";
+        $ver.classList.toggle("nueva", !!nueva);
+        $ver.title = nueva
+          ? "Hay una versión nueva (" + nueva + "): clic para instalarla. La app se reinicia y vuelve a abrir tus pestañas."
+          : "Versión de la app · clic: buscar actualización";
         // Tema: manda el de la APP (payload `dark`). Mientras Rust no sepa nada (null),
         // no se pone clase y siguen las media queries del sistema como arranque en frío.
         if (typeof estado.dark === "boolean") {
