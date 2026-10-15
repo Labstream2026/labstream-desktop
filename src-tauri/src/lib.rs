@@ -89,6 +89,59 @@ fn color_de_pagina(c: &str) -> Option<String> {
     (hex.len() == 6 && hex.chars().all(|ch| ch.is_ascii_hexdigit())).then(|| c.to_ascii_lowercase())
 }
 
+// ── La FICHA que la página manda para su pestaña (1.25, 15-oct-2026) ──
+// `<meta name="ls-pestana" content="{icono, nombre, detalle, color, cliente:{nombre, iniciales,
+// color}}">` (labstream-os lib/pestana): qué icono la representa (uno de los que la barra sabe
+// pintar), su nombre corto y lo de dentro, el color exacto de su cabecera (la activa se funde con
+// ella) y de qué cliente es (franja y chip con su color de marca). Se valida aquí campo a campo:
+// a la barra solo llegan nombres de icono conocidos, textos cortos y colores #rrggbb.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+struct ClienteFicha {
+    nombre: String,
+    iniciales: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+struct Ficha {
+    icono: String,
+    nombre: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    detalle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cliente: Option<ClienteFicha>,
+}
+
+const ICONOS_FICHA: &[&str] = &["inicio", "proyecto", "fotos", "edicion", "portada", "video", "cliente", "chat", "notas", "recordatorios", "calendario", "documento", "archivos", "ajustes", "tareas", "entregas"];
+
+fn texto_corto(s: &str, max: usize) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(max).collect()
+}
+
+fn ficha_de_pagina(json: &str) -> Option<Ficha> {
+    if json.len() > 2000 {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let texto = |k: &str, max: usize| v.get(k).and_then(|x| x.as_str()).map(|s| texto_corto(s, max)).filter(|s| !s.is_empty());
+    let icono = texto("icono", 20).filter(|i| ICONOS_FICHA.contains(&i.as_str()))?;
+    let nombre = texto("nombre", 60)?;
+    let cliente = v.get("cliente").and_then(|c| {
+        let nombre = c.get("nombre")?.as_str().map(|s| texto_corto(s, 40)).filter(|s| !s.is_empty())?;
+        let iniciales = c.get("iniciales").and_then(|x| x.as_str()).map(|s| texto_corto(s, 3)).filter(|s| !s.is_empty()).unwrap_or_else(|| nombre.chars().take(2).collect::<String>().to_uppercase());
+        Some(ClienteFicha { nombre, iniciales, color: c.get("color").and_then(|x| x.as_str()).and_then(color_de_pagina) })
+    });
+    Some(Ficha { icono, nombre, detalle: texto("detalle", 60), color: v.get("color").and_then(|x| x.as_str()).and_then(color_de_pagina), cliente })
+}
+
+// Lo que la pestaña enseña en vivo (`<html data-ls-estado>`): cambios sin guardar o trabajando.
+fn estado_de_pagina(s: &str) -> Option<String> {
+    matches!(s, "sucio" | "trabajando").then(|| s.to_string())
+}
+
 // Un nombre de ventana que identifica pestaña: los de la app (`ls-…`, p. ej. `ls-edicion-<set>`).
 // Los reservados del navegador (_blank, _self…) y cualquier otro abren pestaña nueva como siempre.
 fn nombre_de_ventana(n: &str) -> Option<String> {
@@ -118,6 +171,24 @@ mod navigation_tests {
             assert_eq!(color_de_pagina(malo), None, "{malo}");
         }
         assert_eq!(nombre_de_ventana("ls-edicion-cmg123").as_deref(), Some("ls-edicion-cmg123"));
+    }
+
+    #[test]
+    fn la_ficha_solo_trae_lo_que_la_barra_sabe_pintar() {
+        let f = ficha_de_pagina(r##"{"icono":"portada","nombre":"  Nueva   portada ","detalle":"Entregables Sept.","color":"#1A1916","cliente":{"nombre":"Camilo Studio","iniciales":"CS","color":"red"},"otra":"cosa"}"##).unwrap();
+        assert_eq!(f.icono, "portada");
+        assert_eq!(f.nombre, "Nueva portada");
+        assert_eq!(f.detalle.as_deref(), Some("Entregables Sept."));
+        assert_eq!(f.color.as_deref(), Some("#1a1916"));
+        let c = f.cliente.unwrap();
+        assert_eq!((c.nombre.as_str(), c.iniciales.as_str(), c.color), ("Camilo Studio", "CS", None));
+        // sin icono conocido o sin nombre, no hay ficha; el JSON roto tampoco
+        assert!(ficha_de_pagina(r#"{"icono":"raro","nombre":"x"}"#).is_none());
+        assert!(ficha_de_pagina(r#"{"icono":"fotos"}"#).is_none());
+        assert!(ficha_de_pagina("{").is_none());
+        assert_eq!(ficha_de_pagina(&format!(r#"{{"icono":"fotos","nombre":"{}"}}"#, "a".repeat(500))).unwrap().nombre.len(), 60);
+        assert_eq!(estado_de_pagina("sucio").as_deref(), Some("sucio"));
+        assert_eq!(estado_de_pagina("rojo"), None);
         for malo in ["", "_blank", "_self", "edicion", "ls-a b", "ls-\"<x>"] {
             assert_eq!(nombre_de_ventana(malo), None, "{malo}");
         }
@@ -156,6 +227,9 @@ struct TabRec {
     // El nombre de ventana con que se abrió (`window.open(url, nombre)`): abrir otra vez con el
     // mismo nombre lleva a esta pestaña en vez de abrir otra (ver `reusar_pestana`).
     nombre: Option<String>,
+    // La ficha que manda la página (ver `ficha_de_pagina`) y su estado en vivo (`estado_de_pagina`).
+    ficha: Option<Ficha>,
+    estado: Option<String>,
 }
 
 // Paleta de colores de pestaña, la misma idea que los grupos de Chrome: sirve para agrupar de
@@ -238,6 +312,9 @@ struct Persisted {
     paginas: Vec<String>,
     #[serde(default)]
     nombres: Vec<String>,
+    // La ficha de cada una, en JSON ("" = ninguna): la barra abre ya con sus iconos y colores.
+    #[serde(default)]
+    fichas: Vec<String>,
     #[serde(default)]
     active: usize,
     #[serde(default)]
@@ -272,6 +349,7 @@ fn save_persisted<R: Runtime>(app: &AppHandle<R>) {
             titles: s.tabs.iter().map(|t| t.title.clone()).collect(),
             paginas: s.tabs.iter().map(|t| t.pagina.clone().unwrap_or_default()).collect(),
             nombres: s.tabs.iter().map(|t| t.nombre.clone().unwrap_or_default()).collect(),
+            fichas: s.tabs.iter().map(|t| t.ficha.as_ref().and_then(|f| serde_json::to_string(f).ok()).unwrap_or_default()).collect(),
             active: s.active,
             autostart: s.autostart,
             dark: s.dark,
@@ -426,12 +504,25 @@ const INIT_JS_TPL: &str = r#"
     } catch (e) { return ''; }
   }
 
+  // La FICHA de la página para su pestaña (`<meta name="ls-pestana">`, labstream-os lib/pestana) y
+  // su estado en vivo (`<html data-ls-estado>`): la valida el shell (ficha_de_pagina).
+  function fichaPestana() {
+    try {
+      var m = document.querySelector('meta[name="ls-pestana"]');
+      var c = m && m.getAttribute('content');
+      return c && c.length < 2000 ? c : '';
+    } catch (e) { return ''; }
+  }
+  function estadoPestana() {
+    try { return (document.documentElement && document.documentElement.getAttribute('data-ls-estado')) || ''; } catch (e) { return ''; }
+  }
+
   // Título, URL y TEMA → barra de pestañas (y para restaurar la sesión al reabrir).
   // El tema viaja aquí porque la web decide su modo con su propio botón y NO sigue al
   // sistema: la barra tiene que copiarle a ELLA. Una página con color propio no lo dice: su
   // fondo oscuro es el de su pestaña, no el tema de la app.
   function report() {
-    var carga = { label: LABEL, title: document.title || 'Labstream OS', url: location.href, pestana: colorPestana() };
+    var carga = { label: LABEL, title: document.title || 'Labstream OS', url: location.href, pestana: colorPestana(), ficha: fichaPestana(), estado: estadoPestana() };
     if (!carga.pestana) {
       var oscuro = temaOscuro();
       if (oscuro !== null) carga.dark = oscuro;
@@ -460,8 +551,10 @@ const INIT_JS_TPL: &str = r#"
   // por si el tema aterriza tarde con la hidratación.
   function vigilarTema() {
     if (!window.MutationObserver) return;
-    var conf = { attributes: true, attributeFilter: ['class', 'style', 'data-theme', 'data-ls-pestana'] };
+    var conf = { attributes: true, attributeFilter: ['class', 'style', 'data-theme', 'data-ls-pestana', 'data-ls-estado'] };
     if (document.documentElement) new MutationObserver(report).observe(document.documentElement, conf);
+    // La ficha cambia al navegar dentro de la app (Next cambia las <meta> de <head>).
+    if (document.head) new MutationObserver(report).observe(document.head, { childList: true, subtree: true, attributes: true, attributeFilter: ['content'] });
     if (document.body) new MutationObserver(report).observe(document.body, conf);
   }
   if (document.body) vigilarTema();
@@ -698,7 +791,7 @@ fn broadcast<R: Runtime>(app: &AppHandle<R>) {
             .tabs
             .iter()
             .enumerate()
-            .map(|(i, t)| json!({ "label": t.label, "title": t.title, "url": t.url, "loading": t.loading, "active": i == s.active, "color": t.color, "pagina": t.pagina }))
+            .map(|(i, t)| json!({ "label": t.label, "title": t.title, "url": t.url, "loading": t.loading, "active": i == s.active, "color": t.color, "pagina": t.pagina, "ficha": t.ficha, "estado": t.estado }))
             .collect();
         json!({
             "tabs": tabs,
@@ -891,7 +984,7 @@ fn crear_pestana<R: Runtime>(app: &AppHandle<R>, url: Option<String>, activate: 
         let mut s = shell.lock().unwrap();
         let label = format!("tab-{}", s.next_id);
         s.next_id += 1;
-        s.tabs.push(TabRec { label: label.clone(), title: "Labstream OS".into(), url: target.clone(), loading: true, color: None, oculta_desde: if activate { None } else { Some(Instant::now()) }, dormida: false, descartada: false, pagina: None, nombre });
+        s.tabs.push(TabRec { label: label.clone(), title: "Labstream OS".into(), url: target.clone(), loading: true, color: None, oculta_desde: if activate { None } else { Some(Instant::now()) }, dormida: false, descartada: false, pagina: None, nombre, ficha: None, estado: None });
         label
     };
 
@@ -1036,7 +1129,7 @@ fn registrar_diferida<R: Runtime>(app: &AppHandle<R>, url: &str, title: &str) {
     let label = format!("tab-{}", s.next_id);
     s.next_id += 1;
     let title = if title.is_empty() { "Labstream OS".to_string() } else { title.to_string() };
-    s.tabs.push(TabRec { label, title, url: url.to_string(), loading: false, color: None, oculta_desde: Some(Instant::now()), dormida: false, descartada: true, pagina: None, nombre: None });
+    s.tabs.push(TabRec { label, title, url: url.to_string(), loading: false, color: None, oculta_desde: Some(Instant::now()), dormida: false, descartada: true, pagina: None, nombre: None, ficha: None, estado: None });
 }
 
 // Vuelve a crear el webview de una pestaña descartada, en su última URL. Devuelve false si no se
@@ -1968,7 +2061,7 @@ pub fn run() {
             // registran descartadas (título, URL y color en la barra) y se crean al hacer clic en
             // ellas, como hacen Chrome y Edge. Antes se cargaban todas a la vez: con 5 pestañas, 5
             // copias enteras de la web app arrancando juntas.
-            let restore: Vec<(String, String, String, String, String)> = {
+            let restore: Vec<(String, String, String, String, String, String)> = {
                 let server = Url::parse(SERVER_URL).expect("URL del servidor válida");
                 saved
                     .tabs
@@ -1978,7 +2071,7 @@ pub fn run() {
                     .take(12)
                     .map(|(i, u)| {
                         let de = |v: &Vec<String>| v.get(i).cloned().unwrap_or_default();
-                        (u.clone(), de(&saved.colors), de(&saved.titles), de(&saved.paginas), de(&saved.nombres))
+                        (u.clone(), de(&saved.colors), de(&saved.titles), de(&saved.paginas), de(&saved.nombres), de(&saved.fichas))
                     })
                     .collect()
             };
@@ -1986,7 +2079,7 @@ pub fn run() {
                 create_tab(&handle, None, true);
             } else {
                 let idx = saved.active.min(restore.len() - 1);
-                for (i, (url, color, title, pagina, nombre)) in restore.iter().enumerate() {
+                for (i, (url, color, title, pagina, nombre, ficha)) in restore.iter().enumerate() {
                     if i == idx {
                         create_tab(&handle, Some(url.clone()), false);
                     } else {
@@ -2001,6 +2094,7 @@ pub fn run() {
                         }
                         t.pagina = color_de_pagina(pagina);
                         t.nombre = nombre_de_ventana(nombre);
+                        t.ficha = ficha_de_pagina(ficha);
                     }
                 }
                 let label = {
@@ -2142,12 +2236,14 @@ pub fn run() {
             });
             let h = handle.clone();
             handle.listen_any("ls-title", move |e| {
-                let (label, title, url, dark, pestana) = (
+                let (label, title, url, dark, pestana, ficha, estado) = (
                     field(e.payload(), "label"),
                     field(e.payload(), "title"),
                     field(e.payload(), "url"),
                     field_bool(e.payload(), "dark"),
                     field(e.payload(), "pestana"),
+                    field(e.payload(), "ficha"),
+                    field(e.payload(), "estado"),
                 );
                 if let Some(label) = label {
                     let shell = h.state::<ShellState>();
@@ -2162,6 +2258,17 @@ pub fn run() {
                         // (una página de antes de la 1.21 no lo manda: se deja como estaba)
                         if let Some(p) = pestana {
                             t.pagina = color_de_pagina(&p);
+                        }
+                        // (una página de antes de la 1.25 no los manda: se dejan como estaban)
+                        if let Some(f) = ficha {
+                            t.ficha = ficha_de_pagina(&f);
+                            // el color de la ficha vale también como color de la pestaña
+                            if t.pagina.is_none() {
+                                t.pagina = t.ficha.as_ref().and_then(|x| x.color.clone());
+                            }
+                        }
+                        if let Some(x) = estado {
+                            t.estado = estado_de_pagina(&x);
                         }
                     }
                     // El tema es global (todas las pestañas del origen comparten modo): el

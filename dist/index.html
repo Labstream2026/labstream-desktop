@@ -273,6 +273,20 @@
       .tab .cerrar:hover { background: var(--btn-hover); color: var(--tab-active-fg); }
       /* Muchas pestañas abiertas: solo el icono (el nombre completo queda en el tooltip),
          y la × únicamente en la activa — como hace Chrome al quedarse sin sitio. */
+      /* ── La FICHA de la página (1.25): icono de línea, nombre + detalle, cliente y estado ──
+         La página se presenta (labstream-os lib/pestana) y la barra solo pinta. */
+      .tab .favicon svg { width: 15px; height: 15px; display: block; }
+      .tab .titulo .detalle { color: var(--muted); font-weight: 400; }
+      #tabs .tab.pagina .titulo .detalle { color: color-mix(in srgb, var(--tp-fg) 55%, transparent); }
+      /* La franja del CLIENTE: su color de marca, arriba, fina. En la activa cruza el borde superior. */
+      .tab .franja { position: absolute; left: 10px; right: 10px; top: 0; height: 2px; border-radius: 0 0 2px 2px; background: var(--cl); opacity: 0.9; }
+      .tab.active .franja { left: 12px; right: 12px; height: 2.5px; }
+      /* El chip del cliente va en el sitio del icono cuando la ficha es de un proyecto o un cliente. */
+      .tab .chip { width: 16px; height: 16px; border-radius: 4px; display: grid; place-items: center; font-size: 8.5px; font-weight: 700; letter-spacing: 0.02em; color: #fff; background: var(--cl); flex: 0 0 auto; }
+      /* Estado en vivo: punto azul = cambios sin guardar; aro = trabajando. */
+      .tab .estado { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: #378ef0; box-shadow: 0 0 0 2px rgba(55, 142, 240, 0.25); }
+      .tab .estado.trabajando { width: 10px; height: 10px; background: none; box-shadow: none; border: 1.8px solid var(--sep); border-top-color: var(--accent); animation: giro 0.9s linear infinite; }
+      #tabs.compactas .tab .estado, #tabs.compactas .tab .franja { display: none; }
       #tabs.compactas .tab { padding: 0 6px; justify-content: center; }
       #tabs.compactas .tab .titulo { display: none; }
       #tabs.compactas .tab:not(.active) .cerrar { display: none; }
@@ -409,6 +423,31 @@
       // Nombre + icono de cada pestaña a partir de su RUTA (mismas etiquetas que la barra
       // superior de la web). Sin esto todas las pestañas se llamaban «(25) Labstream OS» y
       // no había forma de distinguirlas.
+      // Iconos de LÍNEA (los mismos trazos que la web), por nombre: los que puede pedir la ficha
+      // de una página (lib/pestana de labstream-os) y los que se asignan por ruta.
+      const ICONOS = {
+        inicio: '<path d="M3 11 12 4l9 7"/><path d="M5 10v10h14V10"/>',
+        proyecto: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+        fotos: '<path d="M4 7h3l2-3h6l2 3h3v12H4z"/><circle cx="12" cy="13" r="3.5"/>',
+        edicion: '<path d="M4 7h3l2-3h6l2 3h3v12H4z"/><circle cx="12" cy="13" r="3.5"/><path d="M12 9.5v7M8.5 13h7" stroke-width="1.2"/>',
+        portada: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m3 16 5-5 4 4 3-3 6 6"/><circle cx="16" cy="9" r="1.6"/>',
+        video: '<rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3z"/>',
+        cliente: '<circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/>',
+        chat: '<path d="M4 5h16v11H9l-5 4z"/>',
+        notas: '<path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4M9 12h6M9 16h6"/>',
+        recordatorios: '<circle cx="12" cy="13" r="7"/><path d="M12 9v4l3 2M5 5l2-2M19 5l-2-2"/>',
+        calendario: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
+        documento: '<path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4"/>',
+        archivos: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 11h18"/>',
+        ajustes: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.2 2.2M16.9 16.9l2.2 2.2M4.9 19.1l2.2-2.2M16.9 7.1l2.2-2.2"/>',
+        tareas: '<path d="m4 12 5 5L20 6"/>',
+        entregas: '<path d="M3 8l9-5 9 5v8l-9 5-9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/>',
+      };
+      function iconoSvg(nombre) {
+        const d = ICONOS[nombre] || ICONOS.inicio;
+        return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + d + "</svg>";
+      }
+
       const RUTAS = [
         [/^\/$/, "🏠", "Inicio"],
         [/^\/inicio/, "🏠", "Inicio"],
@@ -447,13 +486,20 @@
         [/^\/docs\//, "📄", "Documento"],
       ];
 
+      // El emoji de cada ruta tiene su icono de línea: así todas las pestañas van del mismo trazo,
+      // también las de páginas que todavía no mandan ficha.
+      const ICONO_DE_EMOJI = { "🏠": "inicio", "✅": "tareas", "📦": "entregas", "💬": "chat", "📝": "notas", "⏰": "recordatorios", "✨": "proyecto", "🎬": "video", "🗂️": "archivos", "📅": "calendario", "📍": "inicio", "📚": "documento", "👤": "cliente", "🗄️": "archivos", "🎞️": "video", "🏁": "entregas", "🧾": "documento", "📄": "documento", "💵": "documento", "📈": "documento", "📊": "documento", "🧭": "calendario", "🤖": "chat", "⚙️": "ajustes", "🗑️": "archivos" };
       function rutaMeta(url) {
         let ruta = "/";
         try { ruta = new URL(url).pathname; } catch (e) {}
+        // Lo que sí se sabe por la ruta: un set de fotos y el modo edición son de fotos, no de video.
+        if (/^\/proyectos\/[^/]+\/fotos\//.test(ruta)) return { icono: "fotos", nombre: /\/revelar/.test(ruta) ? "Edición" : "Fotos" };
+        if (/^\/proyectos\/[^/]+\/portada/.test(ruta)) return { icono: "portada", nombre: "Portada" };
+        if (/^\/proyectos\/[^/]+/.test(ruta)) return { icono: "proyecto", nombre: "Proyecto" };
         for (const [re, emoji, nombre] of RUTAS) {
-          if (re.test(ruta)) return { emoji, nombre };
+          if (re.test(ruta)) return { icono: ICONO_DE_EMOJI[emoji] || "inicio", nombre };
         }
-        return { emoji: "🗂️", nombre: "Labstream OS" };
+        return { icono: "inicio", nombre: "Labstream OS" };
       }
 
       // El título de la web es «(25) Labstream OS» en todas las páginas: se le quita el
@@ -466,9 +512,12 @@
         return /^labstream(\s+os)?$/i.test(x) ? "" : x;
       }
 
+      // Lo que enseña la pestaña: la ficha que mandó la página, si la hay; si no, el título y la ruta.
       function nombreDe(t) {
+        const f = t.ficha;
+        if (f && f.icono && f.nombre) return { icono: f.icono, texto: f.nombre, detalle: f.detalle || "", cliente: f.cliente || null };
         const meta = rutaMeta(t.url || "");
-        return { emoji: meta.emoji, texto: limpiarTitulo(t.title) || meta.nombre };
+        return { icono: meta.icono, texto: limpiarTitulo(t.title) || meta.nombre, detalle: "", cliente: null };
       }
 
       // Reordenar arrastrando, con eventos de PUNTERO: el drag&drop de HTML5 no llega al
@@ -530,7 +579,7 @@
       function render() {
         $tabs.textContent = "";
         for (const t of estado.tabs) {
-          const { emoji, texto } = nombreDe(t);
+          const { icono, texto, detalle, cliente } = nombreDe(t);
           const el = document.createElement("div");
           el.className = "tab" + (t.active ? " active" : "");
           el.dataset.label = t.label;
@@ -541,17 +590,44 @@
             el.style.setProperty("--tp", t.pagina);
             el.style.setProperty("--tp-fg", esClaro(t.pagina) ? "#202124" : "#ececec");
           }
-          el.title = texto;
+          el.title = (detalle ? texto + " · " + detalle : texto) + (cliente ? " — " + cliente.nombre : "");
 
+          // El cliente: su color en la franja de arriba y, de proyecto o cliente, su chip de iniciales.
+          const colorCliente = cliente && /^#[0-9a-f]{6}$/i.test(cliente.color || "") ? cliente.color : cliente ? "#6b7280" : "";
+          if (colorCliente) {
+            el.style.setProperty("--cl", colorCliente);
+            const franja = document.createElement("span");
+            franja.className = "franja";
+            el.appendChild(franja);
+          }
           const fav = document.createElement("span");
           fav.className = "favicon" + (t.loading ? " cargando" : "");
-          fav.textContent = t.loading ? "" : emoji;
+          if (!t.loading) {
+            if (cliente && (icono === "proyecto" || icono === "cliente")) {
+              fav.className += " chip";
+              fav.textContent = String(cliente.iniciales || "?").slice(0, 3);
+            } else fav.innerHTML = iconoSvg(icono);
+          }
           el.appendChild(fav);
 
           const titulo = document.createElement("span");
           titulo.className = "titulo";
           titulo.textContent = texto;
+          if (detalle) {
+            const d = document.createElement("span");
+            d.className = "detalle";
+            d.textContent = " · " + detalle;
+            titulo.appendChild(d);
+          }
           el.appendChild(titulo);
+
+          // Estado en vivo (data-ls-estado de la página): cambios sin guardar o trabajando.
+          if (t.estado === "sucio" || t.estado === "trabajando") {
+            const e = document.createElement("span");
+            e.className = "estado" + (t.estado === "trabajando" ? " trabajando" : "");
+            e.title = t.estado === "trabajando" ? "Trabajando…" : "Cambios sin guardar";
+            el.appendChild(e);
+          }
 
           const x = document.createElement("button");
           x.className = "cerrar";
