@@ -15,8 +15,11 @@
 // [1, 4, alto, ancho] —RGB 0..1 con el hueco a cero, y el hueco 0/1— y una salida [1, 3, alto, ancho]
 // RGB 0..1, la foto entera.
 
-/// El lado mayor al que se rellena.
+/// El lado mayor al que se rellena. Con `alta` (1.26, «Calidad alta» en el editor), hasta 2048: un
+/// hueco grande a 1024 sale borroso, pero a 2048 son unos 45 s en la CPU (14-oct-2026, este PC),
+/// así que se elige a mano.
 pub const LADO_MAX: usize = 1024;
+pub const LADO_ALTA: usize = 2048;
 
 /// Cómo entra un trozo de `ancho` × `alto` al modelo: reducido a `sw` × `sh` y completado en espejo
 /// hasta `pw` × `ph` (potencias de 2).
@@ -28,9 +31,9 @@ pub struct Plan {
     pub ph: usize,
 }
 
-pub fn plan(ancho: usize, alto: usize) -> Plan {
+pub fn plan(ancho: usize, alto: usize, alta: bool) -> Plan {
     let mayor = ancho.max(alto);
-    let lado = if mayor <= 768 { 512 } else { LADO_MAX };
+    let lado = if mayor <= 768 { 512 } else if mayor <= 1400 || !alta { LADO_MAX } else { LADO_ALTA };
     let k = (lado as f64 / mayor as f64).min(1.0);
     let sw = ((ancho as f64 * k).round() as usize).clamp(8, lado);
     let sh = ((alto as f64 * k).round() as usize).clamp(8, lado);
@@ -133,11 +136,16 @@ mod pruebas {
 
     #[test]
     fn el_plan_reduce_lo_justo_y_completa_hasta_potencias_de_2() {
-        assert_eq!(plan(700, 460), Plan { sw: 512, sh: 336, pw: 512, ph: 512 });
-        assert_eq!(plan(500, 300), Plan { sw: 500, sh: 300, pw: 512, ph: 512 });
-        assert_eq!(plan(1400, 933), Plan { sw: 1024, sh: 682, pw: 1024, ph: 1024 });
-        assert_eq!(plan(200, 100), Plan { sw: 200, sh: 100, pw: 256, ph: 128 });
-        assert_eq!(plan(20, 10), Plan { sw: 20, sh: 10, pw: 64, ph: 64 });
+        assert_eq!(plan(700, 460, false), Plan { sw: 512, sh: 336, pw: 512, ph: 512 });
+        assert_eq!(plan(500, 300, false), Plan { sw: 500, sh: 300, pw: 512, ph: 512 });
+        assert_eq!(plan(1400, 933, false), Plan { sw: 1024, sh: 682, pw: 1024, ph: 1024 });
+        // calidad alta: solo cambia en los huecos grandes
+        assert_eq!(plan(2048, 1365, false), Plan { sw: 1024, sh: 683, pw: 1024, ph: 1024 });
+        assert_eq!(plan(2048, 1365, true), Plan { sw: 2048, sh: 1365, pw: 2048, ph: 2048 });
+        assert_eq!(plan(1600, 1600, true), Plan { sw: 1600, sh: 1600, pw: 2048, ph: 2048 });
+        assert_eq!(plan(700, 460, true), Plan { sw: 512, sh: 336, pw: 512, ph: 512 });
+        assert_eq!(plan(200, 100, false), Plan { sw: 200, sh: 100, pw: 256, ph: 128 });
+        assert_eq!(plan(20, 10, false), Plan { sw: 20, sh: 10, pw: 64, ph: 64 });
         assert_eq!(espejo(5, 4), 1);
         assert_eq!(espejo(3, 4), 3);
     }
@@ -146,7 +154,7 @@ mod pruebas {
     fn fuera_del_hueco_queda_lo_que_habia() {
         // 2 × 1: el primero es hueco
         let rgba = [10, 20, 30, 255, 40, 50, 60, 0];
-        let p = plan(2, 1);
+        let p = plan(2, 1, false);
         let e = entrada(&rgba, 2, 1, p);
         let m = p.pw * p.ph;
         assert_eq!(e.len(), 4 * m);

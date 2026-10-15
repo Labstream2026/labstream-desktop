@@ -244,18 +244,20 @@ fn buscar(rgba: &[u8], ancho: usize, alto: usize) -> Result<Vec<u8>, String> {
 #[tauri::command]
 pub async fn ia_rellenar(request: tauri::ipc::Request<'_>) -> Result<tauri::ipc::Response, String> {
     let (rgba, ancho, alto) = foto_de(&request)?;
-    tauri::async_runtime::spawn_blocking(move || rellenar(&rgba, ancho, alto))
+    // «Calidad alta» (1.26): hasta 2048 px en los huecos grandes (más nítido, mucho más lento).
+    let alta = request.headers().get("x-calidad").and_then(|v| v.to_str().ok()) == Some("alta");
+    tauri::async_runtime::spawn_blocking(move || rellenar(&rgba, ancho, alto, alta))
         .await
         .map_err(|e| format!("La IA falló: {e}"))?
         .map(tauri::ipc::Response::new)
 }
 
-fn rellenar(rgba: &[u8], ancho: usize, alto: usize) -> Result<Vec<u8>, String> {
+fn rellenar(rgba: &[u8], ancho: usize, alto: usize, alta: bool) -> Result<Vec<u8>, String> {
     let mut m = RELLENO.lock().unwrap_or_else(|e| e.into_inner());
     let Some(a) = m.as_mut() else {
         return Err("La IA no está preparada.".into());
     };
-    let p = relleno::plan(ancho, alto);
+    let p = relleno::plan(ancho, alto, alta);
     let t0 = Instant::now();
     let r = a.motor.correr_forma(&[1, 4, p.ph, p.pw], relleno::entrada(rgba, ancho, alto, p));
     a.usado = Instant::now();
@@ -357,7 +359,7 @@ mod pruebas {
                     rgba[i + 3] = if hueco { 255 } else { 0 };
                 }
             }
-            let p = relleno::plan(w, h);
+            let p = relleno::plan(w, h, std::env::var("LS_IA_ALTA").is_ok());
             let t = Instant::now();
             let (_, planos) = m.correr_forma(&[1, 4, p.ph, p.pw], relleno::entrada(&rgba, w, h, p)).unwrap();
             let rgb = relleno::salida(&planos, p, &rgba, w, h);

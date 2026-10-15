@@ -2367,7 +2367,7 @@ dependencies = [
 
 [[package]]
 name = "labstream-desktop"
-version = "1.25.0"
+version = "1.26.0"
 dependencies = [
  "active-win-pos-rs",
  "device_query",
