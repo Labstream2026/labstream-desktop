@@ -16,7 +16,7 @@
 //   ia_sujeto   ← RGBA en el cuerpo (binario) + x-ancho / x-alto
 //               → [ancho u32][alto u32][un byte por punto] (lib/revelado/ia-local: leerRespuesta)
 //   ia_generar  ← RGBA con el hueco en el alfa + x-ancho / x-alto / x-frase (codificada como en
-//                 una URL) / x-n / x-pasos / x-semilla
+//                 una URL) / x-n / x-pasos / x-semilla / x-fuerza (1..100 %, 1.28) / x-guia (1..15, 1.28)
 //               → [n u32][ancho u32][alto u32][semilla u64][RGB de cada propuesta, 3 bytes por punto]
 // `que` es "sujeto" (o nada: la página de la 1.22) o "generativo". El resultado vuelve a la página,
 // que lo pone en la máscara o en un parche de la foto y lo guarda con su revelado.
@@ -266,10 +266,13 @@ pub async fn ia_generar<R: Runtime>(app: AppHandle<R>, request: tauri::ipc::Requ
     let (rgba, ancho, alto) = foto_de(&request)?;
     let numero = |k: &str, d: u64| request.headers().get(k).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()).unwrap_or(d);
     let pedido = (texto_de(&request, "x-frase"), numero("x-n", 2).clamp(1, 4) as u8, numero("x-pasos", 24).clamp(10, 40) as u8, request.headers().get("x-semilla").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()));
+    // 1.28: la fuerza (en % desde la página) y el peso de la frase; sin cabecera, lo de siempre
+    let fuerza = numero("x-fuerza", 99).clamp(10, 100) as f32 / 100.0;
+    let guia = numero("x-guia", 10).clamp(1, 15) as f32;
     let dir = carpeta(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let (frase, n, pasos, semilla) = pedido;
-        let (propuestas, semilla) = generativo::rellenar(&dir, &generativo::Pedido { rgba: &rgba, ancho, alto, frase, n, pasos, semilla })?;
+        let (propuestas, semilla) = generativo::rellenar(&dir, &generativo::Pedido { rgba: &rgba, ancho, alto, frase, n, pasos, semilla, fuerza, guia })?;
         // [n u32][ancho u32][alto u32][semilla u64][RGB…]
         let mut out = Vec::with_capacity(20 + propuestas.len() * ancho * alto * 3);
         out.extend_from_slice(&(propuestas.len() as u32).to_le_bytes());

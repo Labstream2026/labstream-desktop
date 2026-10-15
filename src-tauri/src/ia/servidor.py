@@ -20,7 +20,7 @@
 import base64, io, json, os, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2"
+VERSION = "3"
 SOLTAR_TRAS = 180
 LADO_MAX = 1024
 PUERTO = int(sys.argv[1]) if len(sys.argv) > 1 else 0
@@ -124,8 +124,11 @@ def rellenar(p):
     mascara = entera.getchannel("A").point(lambda a: 255 if a >= 128 else 0)
     n = max(1, min(4, int(p.get("n", 1))))
     pasos = max(10, min(40, int(p.get("pasos", 24))))
-    fuerza = max(0.0, min(1.0, float(p.get("fuerza", 0.99))))
-    guia = max(1.0, min(15.0, float(p.get("guia", 8.0))))
+    # fuerza: cuánto se aparta de lo que había dentro de lo pintado (1 = lo inventa del todo; menos
+    # conserva la forma y la luz de lo que había). guia: cuánto pesa la frase (más = le hace más
+    # caso, a costa de naturalidad; 10 desde la v3, antes 8: a 8 a veces seguía la escena y no la frase).
+    fuerza = max(0.1, min(1.0, float(p.get("fuerza", 0.99))))
+    guia = max(1.0, min(15.0, float(p.get("guia", 10.0))))
     semilla = int(p.get("semilla", time.time_ns() % 2_147_483_647))
     frase = str(p.get("frase", "")).strip()
     # sin frase: quitar lo pintado y seguir la escena (la frase lleva el escenario, no un objeto)
@@ -144,7 +147,7 @@ def rellenar(p):
         im = Image.composite(im.convert("RGB"), imagen, mascara)
         imagenes.append(base64.b64encode(im.tobytes()).decode("ascii"))
     seg = time.time() - t
-    log(f"relleno {ancho}×{alto} ×{n} a {pasos} pasos en {seg:.1f} s")
+    log(f"relleno {ancho}×{alto} ×{n} a {pasos} pasos · fuerza {fuerza:.2f} · guía {guia:.1f} en {seg:.1f} s")
     return {"imagenes": imagenes, "ancho": ancho, "alto": alto, "segundos": seg, "semilla": semilla}
 
 

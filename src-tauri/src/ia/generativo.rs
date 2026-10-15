@@ -114,6 +114,10 @@ pub struct Pedido<'a> {
     pub n: u8,
     pub pasos: u8,
     pub semilla: Option<u64>,
+    /// cuánto se aparta de lo que había dentro de lo pintado (0,1..1; 1 = lo inventa del todo)
+    pub fuerza: f32,
+    /// cuánto pesa la frase (1..15)
+    pub guia: f32,
 }
 
 /// Rellena lo pintado: `n` propuestas de RGB (`ancho` × `alto`) y la semilla que se usó.
@@ -121,7 +125,7 @@ pub fn rellenar(dir: &Path, p: &Pedido) -> Result<(Vec<Vec<u8>>, u64), String> {
     use base64::Engine;
     let puerto = arrancar(dir)?;
     let b64 = base64::engine::general_purpose::STANDARD;
-    let mut cuerpo = serde_json::json!({ "rgba": b64.encode(p.rgba), "ancho": p.ancho, "alto": p.alto, "frase": p.frase, "n": p.n, "pasos": p.pasos });
+    let mut cuerpo = serde_json::json!({ "rgba": b64.encode(p.rgba), "ancho": p.ancho, "alto": p.alto, "frase": p.frase, "n": p.n, "pasos": p.pasos, "fuerza": p.fuerza, "guia": p.guia });
     if let Some(s) = p.semilla {
         cuerpo["semilla"] = serde_json::json!(s);
     }
@@ -148,7 +152,7 @@ pub fn rellenar(dir: &Path, p: &Pedido) -> Result<(Vec<Vec<u8>>, u64), String> {
     if let Some(x) = MOTOR.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         x.usado = Instant::now();
     }
-    crate::salud::anotar("INFO", "ia", &format!("generativo: {} propuestas de {}×{} a {} pasos en {:.1} s", salida.len(), p.ancho, p.alto, p.pasos, t0.elapsed().as_secs_f32()));
+    crate::salud::anotar("INFO", "ia", &format!("generativo: {} propuestas de {}×{} a {} pasos · fuerza {:.2} · guía {:.1} en {:.1} s", salida.len(), p.ancho, p.alto, p.pasos, p.fuerza, p.guia, t0.elapsed().as_secs_f32()));
     Ok((salida, semilla))
 }
 
