@@ -48,8 +48,8 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   sin uso y se apaga con la app. Comando `ia_generar`; `ia_estado` / `ia_preparar` llevan
   `{ que: "generativo" }`. (De la 1.23 a la 1.26 rellenaba LaMa en la CPU; esa IA se borra
   del equipo al preparar esta.) Desde la 1.28 la página manda también `x-fuerza` (cuánto se
-  aparta de lo que había dentro de lo pintado, 10–100 %) y `x-guia` (cuánto pesa la frase, 1–15;
-  10 por defecto, antes 8).
+  aparta de lo que había dentro de lo pintado, 10–100 %; al 100 % crea lo que pide la frase, por
+  debajo sigue la escena) y `x-guia` (cuánto pesa la frase, 1–15; 12 por defecto, antes 8).
 - **Pestañas con nombre** (v1.21.0): `window.open(url, "ls-…")` o un enlace con
   `target="ls-…"` abre la pestaña la primera vez y las siguientes **vuelven a
   ella** en vez de abrir otra. La página recibe la URL nueva por

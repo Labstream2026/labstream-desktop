@@ -124,11 +124,13 @@ def rellenar(p):
     mascara = entera.getchannel("A").point(lambda a: 255 if a >= 128 else 0)
     n = max(1, min(4, int(p.get("n", 1))))
     pasos = max(10, min(40, int(p.get("pasos", 24))))
-    # fuerza: cuánto se aparta de lo que había dentro de lo pintado (1 = lo inventa del todo; menos
-    # conserva la forma y la luz de lo que había). guia: cuánto pesa la frase (más = le hace más
-    # caso, a costa de naturalidad; 10 desde la v3, antes 8: a 8 a veces seguía la escena y no la frase).
-    fuerza = max(0.1, min(1.0, float(p.get("fuerza", 0.99))))
-    guia = max(1.0, min(15.0, float(p.get("guia", 10.0))))
+    # fuerza: cuánto se aparta de lo que había dentro de lo pintado. Probado el 15-oct-2026: a 0.99
+    # (lo de antes) el modelo arranca de la foto con ruido y SIGUE LA ESCENA aunque la frase pida una
+    # lámpara; a 1.0 arranca de ruido puro y crea lo pedido (lámpara, cuadro, extintor: 3 de 3).
+    # Menos de 1 conserva la forma y la luz de lo que había. guia: cuánto pesa la frase (12 desde la
+    # v3; antes 8, que a veces no bastaba).
+    fuerza = max(0.1, min(1.0, float(p.get("fuerza", 1.0))))
+    guia = max(1.0, min(15.0, float(p.get("guia", 12.0))))
     semilla = int(p.get("semilla", time.time_ns() % 2_147_483_647))
     frase = str(p.get("frase", "")).strip()
     # sin frase: quitar lo pintado y seguir la escena (la frase lleva el escenario, no un objeto)
