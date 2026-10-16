@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ia-mantener"
+description = "Enables the ia_mantener command without any pre-configured scope."
+commands.allow = ["ia_mantener"]
+
+[[permission]]
+identifier = "deny-ia-mantener"
+description = "Denies the ia_mantener command without any pre-configured scope."
+commands.deny = ["ia_mantener"]

@@ -7,6 +7,11 @@
 // motor de piezas.rs— con `servidor.py` (este mismo archivo va dentro de la app: include_str!) que
 // escucha en 127.0.0.1 en el puerto que el sistema le dé; esta app lo arranca cuando hace falta,
 // le habla por HTTP y lo apaga al salir (y él se cierra solo si la app muere).
+//
+// 1.29 (motor v4): la página precarga el modelo al abrir Rellenar (`abrir_modelo`) y lo mantiene
+// mientras el panel está abierto (`mantener`); vive en la RAM y sube a la tarjeta por partes solo al
+// generar. Las propuestas salen de una en una y con el color corregido (servidor.py); para quitar,
+// el motor arranca del hueco tapado con su borde y el grano de alrededor (`prellenar`).
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -105,6 +110,49 @@ pub fn arrancar(dir: &Path) -> Result<u16, String> {
     Ok(puerto)
 }
 
+/// Lo que se espera a que el modelo se abra: la primera vez lee 7 GB del disco (de la RAM, segundos).
+const ABRIR: Duration = Duration::from_secs(4 * 60);
+
+/// La precarga (1.29): el motor en marcha y el modelo ya abierto (en la RAM; a la tarjeta sube por
+/// partes al generar), para que el primer relleno no espere. La página la pide al abrir Rellenar (por ia_preparar). Un motor de antes de la v4 no
+/// sabe abrirlo así: entonces se abre con el primer relleno, como siempre.
+pub fn abrir_modelo(dir: &Path) -> Result<(), String> {
+    let puerto = arrancar(dir)?;
+    let t0 = Instant::now();
+    match ureq::AgentBuilder::new().timeout(ABRIR).build().post(&format!("{}/abrir", base(puerto))).send_string("{}") {
+        Ok(_) => {
+            if let Some(x) = MOTOR.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                x.usado = Instant::now();
+            }
+            crate::salud::anotar("INFO", "ia", &format!("generativo: modelo listo en {:.1} s", t0.elapsed().as_secs_f32()));
+            Ok(())
+        }
+        Err(ureq::Error::Status(404, _)) => Ok(()),
+        Err(ureq::Error::Status(_, r)) => {
+            let e = r.into_json::<serde_json::Value>().ok().and_then(|v| v.get("error").and_then(|x| x.as_str()).map(String::from)).unwrap_or_else(|| "el motor falló".into());
+            Err(format!("No se pudo abrir el modelo: {e}"))
+        }
+        Err(e) => Err(format!("El motor generativo no contestó: {e}")),
+    }
+}
+
+/// «Sigue haciendo falta» (1.29): mientras la página tiene Rellenar abierto, el modelo no se suelta.
+/// No arranca nada: si el motor no está en marcha, no hay nada que mantener. ¿Lo había?
+pub fn mantener() -> bool {
+    let puerto = {
+        let mut m = MOTOR.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(x) = m.as_mut() else {
+            return false;
+        };
+        if x.hijo.try_wait().ok().flatten().is_some() {
+            return false;
+        }
+        x.usado = Instant::now();
+        x.puerto
+    };
+    ureq::AgentBuilder::new().timeout(Duration::from_secs(2)).build().post(&format!("{}/mantener", base(puerto))).send_string("{}").is_ok()
+}
+
 /// Lo que se le pide al motor.
 pub struct Pedido<'a> {
     pub rgba: &'a [u8],
@@ -118,6 +166,8 @@ pub struct Pedido<'a> {
     pub fuerza: f32,
     /// cuánto pesa la frase (1..15)
     pub guia: f32,
+    /// para quitar (1.29): el hueco tapado con su borde y el grano de alrededor antes de generar
+    pub prellenar: bool,
 }
 
 /// Rellena lo pintado: `n` propuestas de RGB (`ancho` × `alto`) y la semilla que se usó.
@@ -128,6 +178,9 @@ pub fn rellenar(dir: &Path, p: &Pedido) -> Result<(Vec<Vec<u8>>, u64), String> {
     let mut cuerpo = serde_json::json!({ "rgba": b64.encode(p.rgba), "ancho": p.ancho, "alto": p.alto, "frase": p.frase, "n": p.n, "pasos": p.pasos, "fuerza": p.fuerza, "guia": p.guia });
     if let Some(s) = p.semilla {
         cuerpo["semilla"] = serde_json::json!(s);
+    }
+    if p.prellenar {
+        cuerpo["prellenar"] = serde_json::json!(true);
     }
     let t0 = Instant::now();
     let r = ureq::AgentBuilder::new().timeout(RELLENO).build().post(&format!("{}/rellenar", base(puerto))).send_json(cuerpo);
@@ -152,7 +205,7 @@ pub fn rellenar(dir: &Path, p: &Pedido) -> Result<(Vec<Vec<u8>>, u64), String> {
     if let Some(x) = MOTOR.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         x.usado = Instant::now();
     }
-    crate::salud::anotar("INFO", "ia", &format!("generativo: {} propuestas de {}×{} a {} pasos · fuerza {:.2} · guía {:.1} en {:.1} s", salida.len(), p.ancho, p.alto, p.pasos, p.fuerza, p.guia, t0.elapsed().as_secs_f32()));
+    crate::salud::anotar("INFO", "ia", &format!("generativo: {} propuestas de {}×{} a {} pasos · fuerza {:.2} · guía {:.1}{} en {:.1} s", salida.len(), p.ancho, p.alto, p.pasos, p.fuerza, p.guia, if p.prellenar { " · prellenado" } else { "" }, t0.elapsed().as_secs_f32()));
     Ok((salida, semilla))
 }
 

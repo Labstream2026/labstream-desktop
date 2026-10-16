@@ -8,15 +8,18 @@
 //   crea lo que se pide con una frase dentro de lo pintado, o quita lo pintado. (La 1.23–1.26
 //   rellenaba con LaMa en la CPU; ya no.)
 //
-// La página (lib/revelado/ia-local en labstream-os) llama a cuatro comandos, permitidos SOLO para el
+// La página (lib/revelado/ia-local en labstream-os) llama a cinco comandos, permitidos SOLO para el
 // origen de la app (capabilities/default.json + el manifiesto de build.rs):
-//   ia_estado   ({ que }) → ¿se puede aquí?, ¿está ya bajado?, cuánto falta, qué tarjeta
+//   ia_estado   ({ que }) → ¿se puede aquí?, ¿está ya bajado?, cuánto falta, qué tarjeta, y (1.29)
+//                           la versión de la app y lo que sabe hacer (`capacidades`)
 //   ia_preparar ({ que }) → baja lo que falte (eventos «ia-progreso» { fase, parte } a esa pestaña)
-//                           y abre el modelo
+//                           y abre el modelo (el generativo, desde la 1.29, ya en la RAM listo: la precarga)
+//   ia_mantener ({ que }) → (1.29) «sigue haciendo falta»: con Rellenar abierto, que no se suelte
 //   ia_sujeto   ← RGBA en el cuerpo (binario) + x-ancho / x-alto
 //               → [ancho u32][alto u32][un byte por punto] (lib/revelado/ia-local: leerRespuesta)
 //   ia_generar  ← RGBA con el hueco en el alfa + x-ancho / x-alto / x-frase (codificada como en
 //                 una URL) / x-n / x-pasos / x-semilla / x-fuerza (1..100 %, 1.28) / x-guia (1..15, 1.28)
+//                 / x-prellenar ("1", 1.29: para quitar, el hueco se tapa con su borde antes de generar)
 //               → [n u32][ancho u32][alto u32][semilla u64][RGB de cada propuesta, 3 bytes por punto]
 // `que` es "sujeto" (o nada: la página de la 1.22) o "generativo". El resultado vuelve a la página,
 // que lo pone en la máscara o en un parche de la foto y lo guarda con su revelado.
@@ -74,6 +77,20 @@ pub struct Estado {
     faltan: u64,
     modelo: &'static str,
     tarjeta: Option<String>,
+    /// la versión de esta app (1.29+), para que la página sepa qué pedir
+    version: &'static str,
+    /// lo que esta app sabe hacer con esa IA (1.29+): «mantener» (ia_mantener), «refinar» (una
+    /// segunda pasada a tamaño real con poca fuerza), «lado-1536» (trozos de hasta 1536 px),
+    /// «prellenar» (x-prellenar: quitar desde el hueco tapado con su borde, no desde el ruido)
+    capacidades: &'static [&'static str],
+}
+
+/// Lo que sabe hacer esta app con cada IA (Estado::capacidades).
+fn capacidades(que: Que) -> &'static [&'static str] {
+    match que {
+        Que::Generativo => &["mantener", "refinar", "lado-1536", "prellenar"],
+        Que::Sujeto => &["mantener"],
+    }
 }
 
 /// Por qué esta IA no puede correr aquí (None: sí puede). Las dos piden Windows con NVIDIA.
@@ -91,7 +108,7 @@ fn motivo(_que: Que, tarjeta: Option<&tarjeta::Tarjeta>) -> Option<String> {
 pub fn ia_estado<R: Runtime>(app: AppHandle<R>, que: Option<String>) -> Estado {
     let t = tarjeta::nvidia();
     let Some(que) = Que::de(que.as_deref()) else {
-        return Estado { que: "", desconocida: true, disponible: false, motivo: Some("Esta app no tiene esa IA.".into()), listo: false, faltan: 0, modelo: "", tarjeta: t.map(|t| t.nombre) };
+        return Estado { que: "", desconocida: true, disponible: false, motivo: Some("Esta app no tiene esa IA.".into()), listo: false, faltan: 0, modelo: "", tarjeta: t.map(|t| t.nombre), version: env!("CARGO_PKG_VERSION"), capacidades: &[] };
     };
     let motivo = motivo(que, t.as_ref());
     let dir = carpeta(&app).ok();
@@ -108,6 +125,8 @@ pub fn ia_estado<R: Runtime>(app: AppHandle<R>, que: Option<String>) -> Estado {
             Que::Generativo => piezas::NOMBRE_RELLENO,
         },
         tarjeta: t.map(|t| t.nombre),
+        version: env!("CARGO_PKG_VERSION"),
+        capacidades: capacidades(que),
     }
 }
 
@@ -168,8 +187,9 @@ fn preparar<R: Runtime>(app: &AppHandle<R>, label: &str, sesion: Option<&str>, q
     if que == Que::Generativo {
         generativo::limpiar_lama(&dir);
         avisar(app, label, "preparando", 0.0);
-        generativo::arrancar(&dir).map_err(|e| {
-            crate::salud::anotar("ERROR", "ia", &format!("no se pudo arrancar el motor generativo: {e}"));
+        // el motor en marcha y el modelo ya en la tarjeta (1.29: así el primer relleno no espera)
+        generativo::abrir_modelo(&dir).map_err(|e| {
+            crate::salud::anotar("ERROR", "ia", &format!("no se pudo preparar el motor generativo: {e}"));
             e
         })?;
         return Ok(());
@@ -201,6 +221,22 @@ fn vigilar() {
             }
         });
     });
+}
+
+/// «Sigue haciendo falta» (1.29): la página lo llama cada minuto mientras tiene abierto lo que usa
+/// esa IA (Rellenar, para el generativo), así no se suelta de la tarjeta a mitad de trabajo. No
+/// abre ni baja nada. ¿Había algo abierto que mantener?
+#[tauri::command]
+pub async fn ia_mantener(que: Option<String>) -> bool {
+    let Some(que) = Que::de(que.as_deref()) else {
+        return false;
+    };
+    tauri::async_runtime::spawn_blocking(move || match que {
+        Que::Generativo => generativo::mantener(),
+        Que::Sujeto => SUJETO.lock().unwrap_or_else(|e| e.into_inner()).as_mut().map(|a| a.usado = Instant::now()).is_some(),
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Al salir de la app: el motor generativo se apaga.
@@ -269,10 +305,12 @@ pub async fn ia_generar<R: Runtime>(app: AppHandle<R>, request: tauri::ipc::Requ
     // 1.28: la fuerza (en % desde la página) y el peso de la frase; sin cabecera, lo de siempre
     let fuerza = numero("x-fuerza", 100).clamp(10, 100) as f32 / 100.0;
     let guia = numero("x-guia", 12).clamp(1, 15) as f32;
+    // 1.29: para quitar, el motor tapa el hueco con su borde y el grano de alrededor antes de generar
+    let prellenar = numero("x-prellenar", 0) == 1;
     let dir = carpeta(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let (frase, n, pasos, semilla) = pedido;
-        let (propuestas, semilla) = generativo::rellenar(&dir, &generativo::Pedido { rgba: &rgba, ancho, alto, frase, n, pasos, semilla, fuerza, guia })?;
+        let (propuestas, semilla) = generativo::rellenar(&dir, &generativo::Pedido { rgba: &rgba, ancho, alto, frase, n, pasos, semilla, fuerza, guia, prellenar })?;
         // [n u32][ancho u32][alto u32][semilla u64][RGB…]
         let mut out = Vec::with_capacity(20 + propuestas.len() * ancho * alto * 3);
         out.extend_from_slice(&(propuestas.len() as u32).to_le_bytes());

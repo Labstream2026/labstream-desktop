@@ -43,13 +43,23 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   que va dentro de la app): Python 3.12 embebido con PyTorch CUDA 12.8 y diffusers, en el
   puerto que el sistema le dé en 127.0.0.1. La primera vez baja el motor (4,7 GB) y el modelo
   (6,9 GB) del servidor de la app (`/api/modelos/equipo/<archivo>`, con la sesión de la
-  pestaña), fijados por huella, a `%LOCALAPPDATA%\<identificador>\ia`. Necesita ~10 GB de
-  VRAM libres mientras trabaja (~10–30 s por propuesta a 1024 px); suelta la VRAM a los 3 min
-  sin uso y se apaga con la app. Comando `ia_generar`; `ia_estado` / `ia_preparar` llevan
-  `{ que: "generativo" }`. (De la 1.23 a la 1.26 rellenaba LaMa en la CPU; esa IA se borra
-  del equipo al preparar esta.) Desde la 1.28 la página manda también `x-fuerza` (cuánto se
-  aparta de lo que había dentro de lo pintado, 10–100 %; al 100 % crea lo que pide la frase, por
-  debajo sigue la escena) y `x-guia` (cuánto pesa la frase, 1–15; 12 por defecto, antes 8).
+  pestaña), fijados por huella, a `%LOCALAPPDATA%\<identificador>\ia`. Comando `ia_generar`;
+  `ia_estado` / `ia_preparar` llevan `{ que: "generativo" }`. (De la 1.23 a la 1.26 rellenaba
+  LaMa en la CPU; esa IA se borra del equipo al preparar esta.) Desde la 1.28 la página manda
+  también `x-fuerza` (cuánto se aparta de lo que había dentro de lo pintado, 10–100 %; al 100 %
+  crea lo que pide la frase, por debajo sigue la escena) y `x-guia` (cuánto pesa la frase, 1–15;
+  12 por defecto, antes 8).
+  **Desde la 1.29 (motor v4)**: el modelo vive en la RAM y sube a la tarjeta por partes solo
+  mientras genera (pico de ~6 GB de VRAM a 1 MP, nada quieto; antes ~10 GB, y con Resolve abierto
+  la tarjeta se desbordaba). Las propuestas salen de una en una (~10 s cada una a 1 MP en una RTX
+  5080) y con el color corregido (lo que el modelo corre el color, medido alrededor del hueco y
+  descontado dentro). La página lo precarga al abrir Rellenar (`ia_preparar` deja el modelo
+  abierto) y lo mantiene con `ia_mantener` cada minuto; sin uso, se suelta a los 10 min. Trozos
+  de hasta 1536 px de lado (~1,2 MP); para quitar, `x-prellenar: 1` tapa el hueco con su borde y
+  el grano de alrededor antes de generar (desde el ruido inventaba otra cosa). `ia_estado` dice la
+  versión y las `capacidades` («mantener», «refinar», «lado-1536», «prellenar»). Banco de
+  pruebas del motor en la tarjeta (el ciclo, y 1.28 frente a 1.29 con fotos de verdad):
+  `tests/banco-motor-generativo.py` (cómo se corre, en su cabecera).
 - **Pestañas con nombre** (v1.21.0): `window.open(url, "ls-…")` o un enlace con
   `target="ls-…"` abre la pestaña la primera vez y las siguientes **vuelven a
   ella** en vez de abrir otra. La página recibe la URL nueva por
