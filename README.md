@@ -60,6 +60,19 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   versión y las `capacidades` («mantener», «refinar», «lado-1536», «prellenar»). Banco de
   pruebas del motor en la tarjeta (el ciclo, y 1.28 frente a 1.29 con fotos de verdad):
   `tests/banco-motor-generativo.py` (cómo se corre, en su cabecera).
+- **Las bibliotecas de Resolve nuevas llegan solas** (v1.30.0, Windows y Mac): la página del
+  OS mira cada 15 min la lista de bibliotecas de Resolve del equipo (`dblist.conf`, en
+  `%APPDATA%\Blackmagic Design\DaVinci Resolve\Preferences` o en
+  `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Preferences`), pregunta al OS a
+  cuáles entra cada usuario de PostgreSQL de esa lista y añade las que falten. Comandos
+  `resolve_lista` (usuarios, direcciones y bibliotecas que ya tiene, **sin claves**) y
+  `resolve_lista_agregar` (añade al final copiando usuario, clave y dirección de una línea que ya
+  está; la página no puede inventar otro servidor ni otro usuario). Solo con Resolve **cerrado**
+  (al cerrarse reescribe su lista) y con copia antes (`dblist.conf.antes-labstream-<seg>`, las 5
+  últimas). Lo que ya se vio alguna vez en la lista no se vuelve a poner (`resolve-lista.json` en
+  la configuración de la app): si alguien quita una a propósito, se queda fuera
+  (`src-tauri/src/resolve_lista.rs`; la otra mitad, en `labstream-os`:
+  `src/components/resolve/bibliotecas-solas.tsx`).
 - **Pestañas con nombre** (v1.21.0): `window.open(url, "ls-…")` o un enlace con
   `target="ls-…"` abre la pestaña la primera vez y las siguientes **vuelven a
   ella** en vez de abrir otra. La página recibe la URL nueva por

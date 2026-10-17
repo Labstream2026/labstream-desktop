@@ -23,6 +23,8 @@
     "allow-ia-preparar",
     "allow-ia-sujeto",
     "allow-ia-generar",
-    "allow-ia-mantener"
+    "allow-ia-mantener",
+    "allow-resolve-lista",
+    "allow-resolve-lista-agregar"
   ]
 }

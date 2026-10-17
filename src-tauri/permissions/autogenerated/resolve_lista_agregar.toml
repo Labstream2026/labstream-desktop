@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resolve-lista-agregar"
+description = "Enables the resolve_lista_agregar command without any pre-configured scope."
+commands.allow = ["resolve_lista_agregar"]
+
+[[permission]]
+identifier = "deny-resolve-lista-agregar"
+description = "Denies the resolve_lista_agregar command without any pre-configured scope."
+commands.deny = ["resolve_lista_agregar"]
