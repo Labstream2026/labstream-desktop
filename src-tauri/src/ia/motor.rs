@@ -145,6 +145,9 @@ mod imp {
         pub fn abrir(_dir: &Path) -> Result<Motor, String> {
             Err("La IA del equipo es para Windows con tarjeta NVIDIA.".into())
         }
+        pub fn abrir_archivo(_dir: &Path, _archivo: &str) -> Result<Motor, String> {
+            Err("La IA del equipo es para Windows con tarjeta NVIDIA.".into())
+        }
         pub fn abrir_en_cpu(_dir: &Path, _archivo: &str) -> Result<Motor, String> {
             Err("La IA del equipo es para Windows.".into())
         }

@@ -1,4 +1,4 @@
-// ── La IA EN EL EQUIPO: la máscara de sujeto (1.22) y Rellenar (1.23) de Labstream OS ──────────
+// ── La IA EN EL EQUIPO: la máscara de sujeto (1.22), Rellenar (1.23) y Reducir ruido (1.31) ─────
 //
 // Munka: «los pcs que usan esta función tienen Nvidia de 16 GB… el modelo se ejecuta en local y se
 // conecta y sube el resultado a la app». En el editor de revelado (modo edición de un set):
@@ -7,8 +7,11 @@
 // - «Rellenar con IA» (1.27): SDXL Inpainting en la tarjeta, en un proceso aparte (generativo.rs):
 //   crea lo que se pide con una frase dentro de lo pintado, o quita lo pintado. (La 1.23–1.26
 //   rellenaba con LaMa en la CPU; ya no.)
+// - «Reducir ruido con IA» (1.31): NAFNet con el mismo ONNX Runtime + DirectML del sujeto, sobre la
+//   foto entera a trozos (ruido.rs). La página la manda a franjas ya preparadas para el modelo y
+//   guarda lo limpio como la nueva fuente de esa foto (como el «Mejorado» de Lightroom).
 //
-// La página (lib/revelado/ia-local en labstream-os) llama a cinco comandos, permitidos SOLO para el
+// La página (lib/revelado/ia-local en labstream-os) llama a seis comandos, permitidos SOLO para el
 // origen de la app (capabilities/default.json + el manifiesto de build.rs):
 //   ia_estado   ({ que }) → ¿se puede aquí?, ¿está ya bajado?, cuánto falta, qué tarjeta, y (1.29)
 //                           la versión de la app y lo que sabe hacer (`capacidades`)
@@ -21,7 +24,9 @@
 //                 una URL) / x-n / x-pasos / x-semilla / x-fuerza (1..100 %, 1.28) / x-guia (1..15, 1.28)
 //                 / x-prellenar ("1", 1.29: para quitar, el hueco se tapa con su borde antes de generar)
 //               → [n u32][ancho u32][alto u32][semilla u64][RGB de cada propuesta, 3 bytes por punto]
-// `que` es "sujeto" (o nada: la página de la 1.22) o "generativo". El resultado vuelve a la página,
+//   ia_ruido    ← (1.31) RGB de 16 bits (little endian) en el cuerpo + x-ancho / x-alto
+//               → [ancho u32][alto u32][RGB de 16 bits] (lib/revelado/ia-local: leerRuido)
+// `que` es "sujeto" (o nada: la página de la 1.22), "generativo" o "ruido" (1.31). El resultado vuelve a la página,
 // que lo pone en la máscara o en un parche de la foto y lo guarda con su revelado.
 //
 // Nada se baja ni se carga al arrancar la app: solo cuando alguien lo pide. Lo bajado vive en los
@@ -34,6 +39,7 @@ mod generativo;
 mod imagen;
 mod motor;
 mod piezas;
+mod ruido;
 mod tarjeta;
 
 use piezas::Que;
@@ -43,7 +49,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, Runtime, Webview};
 
-/// Sin usarlo este rato, el modelo del sujeto se suelta de la tarjeta (el generativo se suelta él solo).
+/// Sin usarlo este rato, el modelo del sujeto o el del ruido se suelta de la tarjeta (el generativo se suelta él solo).
 const SOLTAR_TRAS: Duration = Duration::from_secs(2 * 60);
 
 struct Abierto {
@@ -53,6 +59,8 @@ struct Abierto {
 
 /// El modelo del sujeto abierto (DirectML).
 static SUJETO: Mutex<Option<Abierto>> = Mutex::new(None);
+/// El modelo de reducir ruido abierto (DirectML, 1.31).
+static RUIDO: Mutex<Option<Abierto>> = Mutex::new(None);
 /// Una preparación a la vez (dos pestañas que piden a la vez no bajan dos veces).
 static PREPARANDO: Mutex<()> = Mutex::new(());
 static VIGILANTE: std::sync::Once = std::sync::Once::new();
@@ -89,7 +97,7 @@ pub struct Estado {
 fn capacidades(que: Que) -> &'static [&'static str] {
     match que {
         Que::Generativo => &["mantener", "refinar", "lado-1536", "prellenar"],
-        Que::Sujeto => &["mantener"],
+        Que::Sujeto | Que::Ruido => &["mantener"],
     }
 }
 
@@ -123,6 +131,7 @@ pub fn ia_estado<R: Runtime>(app: AppHandle<R>, que: Option<String>) -> Estado {
         modelo: match que {
             Que::Sujeto => piezas::NOMBRE_MODELO,
             Que::Generativo => piezas::NOMBRE_RELLENO,
+            Que::Ruido => piezas::NOMBRE_RUIDO,
         },
         tarjeta: t.map(|t| t.nombre),
         version: env!("CARGO_PKG_VERSION"),
@@ -194,11 +203,13 @@ fn preparar<R: Runtime>(app: &AppHandle<R>, label: &str, sesion: Option<&str>, q
         })?;
         return Ok(());
     }
-    let mut m = SUJETO.lock().unwrap_or_else(|e| e.into_inner());
+    let abierto = if que == Que::Ruido { &RUIDO } else { &SUJETO };
+    let mut m = abierto.lock().unwrap_or_else(|e| e.into_inner());
     if m.is_none() {
         avisar(app, label, "preparando", 0.0);
         let t0 = Instant::now();
-        let motor = motor::Motor::abrir(&dir).map_err(|e| {
+        let abrir = if que == Que::Ruido { motor::Motor::abrir_archivo(&dir, piezas::ARCHIVO_RUIDO) } else { motor::Motor::abrir(&dir) };
+        let motor = abrir.map_err(|e| {
             crate::salud::anotar("ERROR", "ia", &format!("no se pudo abrir el modelo de {}: {e}", que.nombre()));
             e
         })?;
@@ -209,15 +220,17 @@ fn preparar<R: Runtime>(app: &AppHandle<R>, label: &str, sesion: Option<&str>, q
     Ok(())
 }
 
-/// Suelta el modelo del sujeto cuando lleva SOLTAR_TRAS sin usarse.
+/// Suelta el modelo del sujeto o el del ruido cuando lleva SOLTAR_TRAS sin usarse.
 fn vigilar() {
     VIGILANTE.call_once(|| {
         std::thread::spawn(|| loop {
             std::thread::sleep(Duration::from_secs(15));
-            let mut m = SUJETO.lock().unwrap_or_else(|e| e.into_inner());
-            if m.as_ref().map(|a| a.usado.elapsed() >= SOLTAR_TRAS).unwrap_or(false) {
-                *m = None;
-                crate::salud::anotar("INFO", "ia", "modelo de sujeto soltado (sin uso)");
+            for (abierto, nombre) in [(&SUJETO, "sujeto"), (&RUIDO, "ruido")] {
+                let mut m = abierto.lock().unwrap_or_else(|e| e.into_inner());
+                if m.as_ref().map(|a| a.usado.elapsed() >= SOLTAR_TRAS).unwrap_or(false) {
+                    *m = None;
+                    crate::salud::anotar("INFO", "ia", &format!("modelo de {nombre} soltado (sin uso)"));
+                }
             }
         });
     });
@@ -234,6 +247,7 @@ pub async fn ia_mantener(que: Option<String>) -> bool {
     tauri::async_runtime::spawn_blocking(move || match que {
         Que::Generativo => generativo::mantener(),
         Que::Sujeto => SUJETO.lock().unwrap_or_else(|e| e.into_inner()).as_mut().map(|a| a.usado = Instant::now()).is_some(),
+        Que::Ruido => RUIDO.lock().unwrap_or_else(|e| e.into_inner()).as_mut().map(|a| a.usado = Instant::now()).is_some(),
     })
     .await
     .unwrap_or(false)
@@ -285,6 +299,52 @@ fn buscar(rgba: &[u8], ancho: usize, alto: usize) -> Result<Vec<u8>, String> {
             // una tarjeta que se perdió: se suelta para abrirla de nuevo la próxima vez
             *m = None;
             crate::salud::anotar("ERROR", "ia", &format!("no se pudo buscar el sujeto: {e}"));
+            Err(e)
+        }
+    }
+}
+
+/// Lo más grande que se limpia de una vez (la página manda la foto a franjas): ~40 MP, unos 1,1 GB
+/// de memoria mientras se funden los trozos.
+const RUIDO_MAX_PUNTOS: usize = 40_000_000;
+
+/// Reduce el ruido de la franja que manda la página (1.31): RGB de 16 bits ya preparado para el
+/// modelo (lib/revelado/ruido-ia de labstream-os), devuelto limpio en el mismo formato.
+#[tauri::command]
+pub async fn ia_ruido(request: tauri::ipc::Request<'_>) -> Result<tauri::ipc::Response, String> {
+    let medida = |k: &str| request.headers().get(k).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+    let (ancho, alto) = (medida("x-ancho"), medida("x-alto"));
+    let tauri::ipc::InvokeBody::Raw(cuerpo) = request.body() else {
+        return Err("La foto no llegó (se esperaban sus píxeles).".into());
+    };
+    if ancho < 1 || alto < 1 || ancho > 16_384 || alto > 16_384 || ancho * alto > RUIDO_MAX_PUNTOS || cuerpo.len() != ancho * alto * 6 {
+        return Err("La foto llegó con unas medidas que no cuadran.".into());
+    }
+    let rgb = ruido::muestras(cuerpo);
+    tauri::async_runtime::spawn_blocking(move || limpiar_ruido(&rgb, ancho, alto))
+        .await
+        .map_err(|e| format!("La IA falló: {e}"))?
+        .map(tauri::ipc::Response::new)
+}
+
+fn limpiar_ruido(rgb: &[u16], ancho: usize, alto: usize) -> Result<Vec<u8>, String> {
+    let mut m = RUIDO.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(a) = m.as_mut() else {
+        return Err("La IA no está preparada.".into());
+    };
+    let t0 = Instant::now();
+    let lado = ruido::LADO;
+    let salida = ruido::limpiar(rgb, ancho, alto, &mut |t| a.motor.correr_forma(&[1, 3, lado, lado], t).map(|(_, d)| d), &mut |_| {});
+    a.usado = Instant::now();
+    match salida {
+        Ok(limpio) => {
+            crate::salud::anotar("INFO", "ia", &format!("ruido de {ancho}×{alto} en {:.2} s", t0.elapsed().as_secs_f32()));
+            Ok(ruido::respuesta(ancho, alto, &limpio))
+        }
+        Err(e) => {
+            // una tarjeta que se perdió: se suelta para abrirla de nuevo la próxima vez
+            *m = None;
+            crate::salud::anotar("ERROR", "ia", &format!("no se pudo reducir el ruido: {e}"));
             Err(e)
         }
     }
@@ -386,4 +446,33 @@ mod pruebas {
         }
     }
 
+    /// Reducir ruido de punta a punta en la tarjeta de ESTE equipo (`cargo test -- --ignored`).
+    /// LS_IA_DIR: una carpeta con onnxruntime.dll, DirectML.dll y nafnet-sidd-width32.onnx.
+    /// LS_RUIDO_ENTRADA: RGB de 16 bits (little endian) de LS_RUIDO_ANCHO × LS_RUIDO_ALTO; lo limpio
+    /// va a LS_RUIDO_SALIDA (mismo formato). Sin entrada, una franja de ruido gris de 3000 × 1100.
+    #[test]
+    #[ignore]
+    fn ruido_en_la_tarjeta() {
+        let dir = PathBuf::from(std::env::var("LS_IA_DIR").expect("LS_IA_DIR"));
+        let t = Instant::now();
+        let mut m = motor::Motor::abrir_archivo(&dir, piezas::ARCHIVO_RUIDO).unwrap();
+        eprintln!("NAFNet abierto en {:.1} s", t.elapsed().as_secs_f32());
+        let num = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let (ancho, alto) = (num("LS_RUIDO_ANCHO", 3000), num("LS_RUIDO_ALTO", 1100));
+        let rgb = match std::env::var("LS_RUIDO_ENTRADA") {
+            Ok(f) => ruido::muestras(&std::fs::read(f).unwrap()),
+            Err(_) => (0..ancho * alto * 3).map(|i| (30000 + (i * 7919 % 4000)) as u16).collect(),
+        };
+        assert_eq!(rgb.len(), ancho * alto * 3);
+        for vuelta in 0..2 {
+            let t = Instant::now();
+            let limpio = ruido::limpiar(&rgb, ancho, alto, &mut |t| m.correr_forma(&[1, 3, ruido::LADO, ruido::LADO], t).map(|(_, d)| d), &mut |_| {}).unwrap();
+            eprintln!("vuelta {vuelta}: {ancho}×{alto} en {:.2} s", t.elapsed().as_secs_f32());
+            if vuelta == 1 {
+                if let Ok(f) = std::env::var("LS_RUIDO_SALIDA") {
+                    std::fs::write(f, &ruido::respuesta(ancho, alto, &limpio)[8..]).unwrap();
+                }
+            }
+        }
+    }
 }

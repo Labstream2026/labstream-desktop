@@ -24,6 +24,7 @@
     "allow-ia-sujeto",
     "allow-ia-generar",
     "allow-ia-mantener",
+    "allow-ia-ruido",
     "allow-resolve-lista",
     "allow-resolve-lista-agregar"
   ]

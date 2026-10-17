@@ -60,6 +60,15 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   versión y las `capacidades` («mantener», «refinar», «lado-1536», «prellenar»). Banco de
   pruebas del motor en la tarjeta (el ciclo, y 1.28 frente a 1.29 con fotos de verdad):
   `tests/banco-motor-generativo.py` (cómo se corre, en su cabecera).
+- **Reducir ruido con IA** (v1.31.0, Windows con NVIDIA): en Detalle del editor de revelado,
+  como el «Mejorado» de Lightroom. NAFNet SIDD de ancho 32 (MIT; la exportación ONNX de
+  darktable-ai 5.6, 117 MB, del servidor de la app con la sesión, fijada por su huella) corre con
+  el mismo ONNX Runtime + DirectML del sujeto: la página manda la foto a franjas ya preparadas
+  (RGB de 16 bits) y `ia_ruido` las limpia a trozos de 768 × 768 que se pisan 64 puntos y se
+  funden sin costuras (`src/ia/ruido.rs`). En una RTX 5080, 1,9 s por foto de 12 MP. Elegido el
+  17-oct-2026 frente a RawNIND, SCUNet y su mezcla con RAW reales a ISO 6400–10000. Prueba en la
+  tarjeta: `LS_IA_DIR=<carpeta con las DLL y el modelo> cargo test --release --lib
+  ruido_en_la_tarjeta -- --ignored --nocapture`.
 - **Las bibliotecas de Resolve nuevas llegan solas** (v1.30.0, Windows y Mac): la página del
   OS mira cada 15 min la lista de bibliotecas de Resolve del equipo (`dblist.conf`, en
   `%APPDATA%\Blackmagic Design\DaVinci Resolve\Preferences` o en

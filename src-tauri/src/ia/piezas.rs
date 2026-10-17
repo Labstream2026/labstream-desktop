@@ -17,6 +17,11 @@
 //   3 GB; generativo.rs) y el modelo SDXL Inpainting 0.1 de diffusers en fp16 (6,9 GB; licencia
 //   CreativeML OpenRAIL++), los dos del servidor de la app (api/modelos/equipo/<archivo>), zips
 //   enteros a su carpeta. Antes (1.23–1.26) era LaMa en la CPU: se borra del equipo (generativo.rs).
+// - Reducir ruido (1.31): NAFNet SIDD de ancho 32 (MIT, Megvii; la exportación ONNX de darktable-ai
+//   5.6, float32, entrada `input` [1, 3, 768, 768] en 0..1, salida igual), del servidor de la app
+//   (api/modelos/equipo/<archivo>). Elegido el 17-oct-2026 frente a RawNIND, SCUNet y su mezcla con
+//   tres RAW de la ZV-E1 a ISO 6400–10000: el único que limpia la piel sin dejarla de plástico y
+//   guarda la trama de la tela. Corre con el mismo ONNX Runtime + DirectML del sujeto (ruido.rs).
 // - ONNX Runtime 1.24.4 con DirectML (NuGet de Microsoft): onnxruntime.dll para x64.
 // - DirectML 1.15.4 (NuGet de Microsoft): DirectML.dll para Windows x64 (el paquete trae también
 //   las de Xbox y las de depurar: se saca por su ruta exacta).
@@ -25,6 +30,8 @@ use super::bajar::{Forma, Pieza};
 
 pub const NOMBRE_MODELO: &str = "BiRefNet";
 pub const NOMBRE_RELLENO: &str = "SDXL Inpainting";
+pub const NOMBRE_RUIDO: &str = "NAFNet";
+pub const ARCHIVO_RUIDO: &str = "nafnet-sidd-width32.onnx";
 /// El lado de la entrada y de la salida del modelo.
 pub const LADO: usize = 1024;
 
@@ -32,11 +39,12 @@ pub const ARCHIVO_MODELO: &str = "birefnet-general-epoch_244-fp16.onnx";
 pub const DLL_ORT: &str = "onnxruntime.dll";
 pub const DLL_DIRECTML: &str = "DirectML.dll";
 
-/// De qué IA se habla: la máscara de sujeto o el generativo (Rellenar con IA).
+/// De qué IA se habla: la máscara de sujeto, el generativo (Rellenar con IA) o reducir ruido (1.31).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Que {
     Sujeto,
     Generativo,
+    Ruido,
 }
 
 impl Que {
@@ -45,6 +53,7 @@ impl Que {
         match v {
             None | Some("sujeto") => Some(Que::Sujeto),
             Some("generativo") => Some(Que::Generativo),
+            Some("ruido") => Some(Que::Ruido),
             _ => None,
         }
     }
@@ -52,6 +61,7 @@ impl Que {
         match self {
             Que::Sujeto => "sujeto",
             Que::Generativo => "generativo",
+            Que::Ruido => "ruido",
         }
     }
 }
@@ -102,10 +112,21 @@ static PIEZAS: [Pieza; 3] = [
     },
 ];
 
-/// Lo que necesita cada IA: el sujeto, ONNX Runtime + DirectML + su modelo; el generativo, su motor y su modelo.
+static RUIDO: Pieza = Pieza {
+    nombre: "nafnet-sidd-width32",
+    url: "https://os.labstreamsas.com/api/modelos/equipo/nafnet-sidd-width32.onnx",
+    sha256: "8b437280db2f9f0ef5c733fa0fec70fc10012a62d19dac24a25b80ec8c529230",
+    bytes: 117_341_957,
+    forma: Forma::Archivo(ARCHIVO_RUIDO),
+    con_sesion: true,
+};
+
+/// Lo que necesita cada IA: el sujeto, ONNX Runtime + DirectML + su modelo; el generativo, su motor
+/// y su modelo; reducir ruido, el mismo ONNX Runtime + DirectML y NAFNet.
 pub fn de(que: Que) -> Vec<&'static Pieza> {
     match que {
         Que::Sujeto => PIEZAS.iter().collect(),
         Que::Generativo => GENERATIVO.iter().collect(),
+        Que::Ruido => vec![&PIEZAS[0], &PIEZAS[1], &RUIDO],
     }
 }
