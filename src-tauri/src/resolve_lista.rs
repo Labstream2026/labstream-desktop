@@ -39,13 +39,19 @@ pub(crate) struct Linea {
 }
 
 /// Una línea de biblioteca de red, o None (la base local, una línea en blanco o rota).
+/// Resolve marca con «*» tras el usuario la última biblioteca abierta («camilo*»): es el mismo usuario
+/// (1.30.1). Se le quita para contarlo y buscar su clave; las líneas nuevas nunca llevan la marca.
 pub(crate) fn leer_linea(l: &str) -> Option<Linea> {
     let l = l.trim_end_matches(['\r', '\n']);
     let c: Vec<&str> = l.split(':').collect();
-    if c.len() != 6 || c[5] != "QPSQL" || c[1].is_empty() || c[2].is_empty() || c[4].is_empty() {
+    if c.len() != 6 {
         return None;
     }
-    Some(Linea { ip: c[1].into(), rol: c[2].into(), clave: c[3].into(), base: c[4].into() })
+    let rol = c[2].trim_end_matches('*');
+    if c[5] != "QPSQL" || c[1].is_empty() || rol.is_empty() || c[4].is_empty() {
+        return None;
+    }
+    Some(Linea { ip: c[1].into(), rol: rol.into(), clave: c[3].into(), base: c[4].into() })
 }
 
 /// La misma línea que escribe el panel del NAS (cnLinea): `<base><ip>:<ip>:<usuario>:<clave>:<base>:QPSQL`.
@@ -327,6 +333,18 @@ mod pruebas {
         let s = escribir_linea("Camilo_Ortega", "192.168.0.22", "camilo", "s3creta");
         assert_eq!(s, "Camilo_Ortega192.168.0.22:192.168.0.22:camilo:s3creta:Camilo_Ortega:QPSQL");
         assert_eq!(leer_linea(&(s + "\r\n")), Some(l("Camilo_Ortega", "192.168.0.22", "camilo", "s3creta")));
+    }
+
+    #[test]
+    fn la_marca_de_la_ultima_biblioteca_es_el_mismo_usuario() {
+        let ls: Vec<Linea> = ["A1:1:camilo:k:A:QPSQL", "B1:1:camilo*:k:B:QPSQL"].iter().filter_map(|x| leer_linea(x)).collect();
+        assert_eq!(ls[1], l("B", "1", "camilo", "k"));
+        assert_eq!(cuentas_de(&ls), vec![Cuenta { rol: "camilo".into(), ip: "1".into(), lineas: 2 }]);
+        assert_eq!(leer_linea("X1:1:*:k:X:QPSQL"), None);
+        // Un equipo con UNA sola biblioteca (la marcada) también recibe las nuevas, sin la marca.
+        let solo: Vec<Linea> = leer_linea("Unica1:1:ana*:k9:Unica:QPSQL").into_iter().collect();
+        assert_eq!(clave_de(&solo, "ana", "1").as_deref(), Some("k9"));
+        assert_eq!(escribir_linea("Nueva", "1", &solo[0].rol, "k9"), "Nueva1:1:ana:k9:Nueva:QPSQL");
     }
 
     #[test]

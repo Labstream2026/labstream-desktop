@@ -71,6 +71,8 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   (al cerrarse reescribe su lista) y con copia antes (`dblist.conf.antes-labstream-<seg>`, las 5
   últimas). Lo que ya se vio alguna vez en la lista no se vuelve a poner (`resolve-lista.json` en
   la configuración de la app): si alguien quita una a propósito, se queda fuera
+  (1.30.1: la marca «*» que Resolve pone tras el usuario de la última biblioteca abierta es el
+  mismo usuario; con la 1.30.0, un equipo con una sola biblioteca no recibía las nuevas)
   (`src-tauri/src/resolve_lista.rs`; la otra mitad, en `labstream-os`:
   `src/components/resolve/bibliotecas-solas.tsx`).
 - **Pestañas con nombre** (v1.21.0): `window.open(url, "ls-…")` o un enlace con
