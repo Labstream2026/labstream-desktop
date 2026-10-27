@@ -501,7 +501,16 @@ const INIT_JS_TPL: &str = r#"
   function colorPestana() {
     try {
       var c = document.documentElement && document.documentElement.getAttribute('data-ls-pestana');
-      return c && /^#[0-9a-fA-F]{6}$/.test(c) ? c : '';
+      if (c && /^#[0-9a-fA-F]{6}$/.test(c)) return c;
+      var meta = document.querySelector('meta[name="ls-pestana"]');
+      try { var f = meta && JSON.parse(meta.getAttribute('content')); if (f && /^#[0-9a-fA-F]{6}$/.test(f.color || '')) return f.color; } catch (_) {}
+      var el = document.elementFromPoint ? document.elementFromPoint(Math.round(innerWidth / 2), 4) : document.body;
+      while (el) {
+        var m = (getComputedStyle(el).backgroundColor || '').match(/^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s\/]+([\d.]+))?/);
+        if (m && (m[4] === undefined || Number(m[4]) >= 0.99)) return '#' + [m[1],m[2],m[3]].map(function(v) { return Math.round(Number(v)).toString(16).padStart(2, '0'); }).join('');
+        el = el.parentElement;
+      }
+      return '';
     } catch (e) { return ''; }
   }
 
