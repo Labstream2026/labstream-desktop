@@ -380,6 +380,23 @@
       }
       #wincontrols button:hover { background: var(--btn-hover); }
       #w-cerrar:hover { background: #c42b1c; color: #fff; }
+      /* La superficie activa también gobierna la barra, sin el salto blanco del editor. */
+      :root.con-superficie {
+        --bg: color-mix(in srgb, var(--superficie) 94%, var(--superficie-fg) 6%);
+        --fg: var(--superficie-fg);
+        --muted: color-mix(in srgb, var(--superficie-fg) 65%, var(--superficie));
+        --border: color-mix(in srgb, var(--superficie-fg) 15%, var(--superficie));
+        --tab-active-bg: var(--superficie); --tab-active-fg: var(--superficie-fg);
+      }
+      #tabs { gap: 5px; overflow-x: auto; scrollbar-width: none; }
+      #tabs::-webkit-scrollbar { display: none; }
+      #tabs .tab { min-width: 64px; }
+      #tabs .tab.active { min-width: 160px; flex-grow: 1.35; }
+      #tabs .tab.pagina:not(.active) { background: color-mix(in srgb, var(--tp) 78%, var(--bg)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tp-fg) 10%, transparent); }
+      #tabs .tab:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+      #tabs .tab.active .titulo { color: inherit; }
+      #tabs .tab .cerrar { flex-shrink: 0; width: 22px; height: 22px; }
+      @media (prefers-reduced-motion: reduce) { .tab { transition: none; } }
     </style>
   </head>
   <body>
@@ -526,7 +543,7 @@
       let tragarClick = false; // el clic que cierra el arrastre no debe activar la pestaña
 
       function ordenActual() {
-        return Array.from($tabs.children).map((el) => el.dataset.label);
+        return Array.from($tabs.querySelectorAll(".tab")).map((el) => el.dataset.label);
       }
 
       addEventListener("mousemove", (e) => {
@@ -536,7 +553,7 @@
           arrastre.movido = true;
           arrastre.el.classList.add("arrastrando");
         }
-        for (const otro of Array.from($tabs.children)) {
+        for (const otro of Array.from($tabs.querySelectorAll(".tab"))) {
           if (otro === arrastre.el) continue;
           const r = otro.getBoundingClientRect();
           if (e.clientX >= r.left && e.clientX <= r.right) {
@@ -576,19 +593,50 @@
         return l > 0.35;
       }
 
+      function colorDeTab(t) {
+        const c = t && (t.pagina || (t.ficha && t.ficha.color));
+        return /^#[0-9a-f]{6}$/i.test(c || "") ? c : null;
+      }
+      function pintarBarra() {
+        const c = colorDeTab(estado.tabs.find(t => t.active));
+        const raiz = document.documentElement;
+        const oscuro = c ? !esClaro(c) : estado.dark;
+        if (typeof oscuro === "boolean") {
+          raiz.classList.toggle("oscuro", oscuro); raiz.classList.toggle("claro", !oscuro);
+        }
+        raiz.classList.toggle("con-superficie", !!c);
+        if (c) { raiz.style.setProperty("--superficie", c); raiz.style.setProperty("--superficie-fg", esClaro(c) ? "#202124" : "#ececec"); }
+        else { raiz.style.removeProperty("--superficie"); raiz.style.removeProperty("--superficie-fg"); }
+      }
       function render() {
+        const foco = document.activeElement && document.activeElement.closest(".tab");
+        const focoId = foco && foco.dataset.label;
+        const focoCerrar = foco && document.activeElement.classList.contains("cerrar");
+        $tabs.setAttribute("role", "tablist"); $tabs.setAttribute("aria-label", "Pestañas de Labstream");
+        pintarBarra();
         $tabs.textContent = "";
         for (const t of estado.tabs) {
           const { icono, texto, detalle, cliente } = nombreDe(t);
           const el = document.createElement("div");
           el.className = "tab" + (t.active ? " active" : "");
           el.dataset.label = t.label;
+          el.setAttribute("role", "tab"); el.setAttribute("aria-selected", String(!!t.active));
+          el.tabIndex = t.active ? 0 : -1;
+          el.setAttribute("aria-label", texto + (detalle ? " · " + detalle : "") + (t.estado === "sucio" ? ", cambios sin guardar" : t.estado === "trabajando" ? ", trabajando" : ""));
+          el.addEventListener("keydown", e => {
+            if (e.target !== el) return;
+            const i = estado.tabs.findIndex(x => x.label === t.label), n = estado.tabs.length;
+            const j = e.key === "ArrowRight" ? (i + 1) % n : e.key === "ArrowLeft" ? (i + n - 1) % n : e.key === "Home" ? 0 : e.key === "End" ? n - 1 : -1;
+            if (j >= 0) { e.preventDefault(); Array.from($tabs.querySelectorAll(".tab")).find(x => x.dataset.label === estado.tabs[j].label)?.focus(); emitir("ls-activate", { label: estado.tabs[j].label }); }
+            else if (e.key === "Enter" || e.key === " ") { e.preventDefault(); emitir("ls-activate", { label: t.label }); }
+          });
           if (t.color) el.dataset.color = t.color; // teñido desde el menú de la pestaña
           // El color que pide la página (ya validado #rrggbb en el shell), con letra que se lea encima.
-          if (t.pagina) {
+          const pagina = colorDeTab(t);
+          if (pagina) {
             el.classList.add("pagina");
-            el.style.setProperty("--tp", t.pagina);
-            el.style.setProperty("--tp-fg", esClaro(t.pagina) ? "#202124" : "#ececec");
+            el.style.setProperty("--tp", pagina);
+            el.style.setProperty("--tp-fg", esClaro(pagina) ? "#202124" : "#ececec");
           }
           el.title = (detalle ? texto + " · " + detalle : texto) + (cliente ? " — " + cliente.nombre : "");
 
@@ -633,6 +681,9 @@
           x.className = "cerrar";
           x.textContent = "×";
           x.title = "Cerrar pestaña (⌘/Ctrl+W)";
+          x.setAttribute("aria-label", "Cerrar " + texto);
+          x.tabIndex = t.active ? 0 : -1;
+          x.addEventListener("mousedown", e => e.stopPropagation());
           x.addEventListener("click", (e) => {
             e.stopPropagation();
             emitir("ls-close-tab", { label: t.label });
@@ -670,9 +721,14 @@
         mas.className = "nueva-tab";
         mas.textContent = "+";
         mas.title = "Nueva pestaña (⌘/Ctrl+T)";
+        mas.setAttribute("aria-label", "Nueva pestaña");
         mas.addEventListener("click", () => emitir("ls-new-tab", {}));
         $tabs.appendChild(mas);
         requestAnimationFrame(ajustarCompactas);
+        if (focoId) {
+          const destino = Array.from($tabs.querySelectorAll(".tab")).find(x => x.dataset.label === focoId);
+          if (destino) (focoCerrar ? destino.querySelector(".cerrar") : destino).focus({ preventScroll: true });
+        }
 
         const activa = $tabs.querySelector(".tab.active");
         if (activa) activa.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -688,10 +744,6 @@
           : "Versión de la app · clic: buscar actualización";
         // Tema: manda el de la APP (payload `dark`). Mientras Rust no sepa nada (null),
         // no se pone clase y siguen las media queries del sistema como arranque en frío.
-        if (typeof estado.dark === "boolean") {
-          document.documentElement.classList.toggle("oscuro", estado.dark);
-          document.documentElement.classList.toggle("claro", !estado.dark);
-        }
         // En macOS la barra ES la fila del título: hay que dejar libre el semáforo.
         document.body.classList.toggle("mac", !!estado.mac);
         // En Windows también ES la fila del título, pero ahí los botones de ventana los

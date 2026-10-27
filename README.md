@@ -297,6 +297,10 @@ Para desarrollo con recarga en caliente (en cualquier sistema): `npm run dev`.
 
 ---
 
+## Pestañas 1.32.0
+
+La barra toma el color de la superficie de la pestaña activa, incluida Configuración y los editores. La pestaña activa tiene más espacio para su nombre; el resto mantiene el color de su página. Con muchas pestañas, la fila se desplaza. Flechas, Inicio y Fin recorren las pestañas con foco visible. Se conserva el estado de cambios sin guardar, el color del cliente y el orden al arrastrar.
+
 ## Versiones (SemVer)
 
 Se usa `MAYOR.MENOR.PARCHE`:
