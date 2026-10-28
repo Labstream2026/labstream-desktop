@@ -1,6 +1,6 @@
 {
   "name": "labstream-desktop",
-  "version": "1.32.0",
+  "version": "1.32.1",
   "private": true,
   "description": "App de escritorio (Windows) que envuelve Labstream OS — cliente del servidor del NAS.",
   "scripts": {
@@ -14,5 +14,3 @@
     "@tauri-apps/cli": "^2"
   }
 }
-
-
