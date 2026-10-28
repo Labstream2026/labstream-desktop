@@ -19,7 +19,7 @@ jobs:
       matrix:
         include:
           # macOS → .dmg universal (Intel + Apple Silicon)
-          - platform: macos-latest
+          - platform: macos-15-intel
             args: "--target universal-apple-darwin"
           # Windows → instalador .exe (NSIS)
           - platform: windows-latest
@@ -38,7 +38,7 @@ jobs:
       - name: Instalar Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.platform == 'macos-15-intel' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Cache de Rust
         uses: swatinem/rust-cache@v2
@@ -76,7 +76,7 @@ jobs:
       # El hardened runtime no se configura: en Tauri v2 `bundle.macOS.hardenedRuntime` ya
       # viene en true, y es lo que hace que los entitlements signifiquen algo.
       - name: Preparar la firma de macOS
-        if: matrix.platform == 'macos-latest'
+        if: matrix.platform == 'macos-15-intel'
         shell: bash
         env:
           CERT: ${{ secrets.APPLE_CERTIFICATE }}
@@ -133,7 +133,7 @@ jobs:
       # cosa. Este paso hace esa comprobación en cada publicación y TUMBA el build si los
       # entitlements no llegaron: es barato y es el único aviso que habría existido.
       - name: Comprobar la firma de macOS
-        if: matrix.platform == 'macos-latest'
+        if: matrix.platform == 'macos-15-intel'
         shell: bash
         run: |
           set -euo pipefail
