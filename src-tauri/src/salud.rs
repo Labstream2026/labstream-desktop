@@ -20,7 +20,13 @@
 //    duermen ya las pestañas ocultas, sin esperar sus 5 minutos.
 //
 // Todo queda en la carpeta de logs de la app (%LOCALAPPDATA%\co.labstream.os\logs) y se abre
-// desde ⋮ ▸ Diagnóstico. No se envía nada a ningún sitio.
+// desde ⋮ ▸ Diagnóstico.
+//
+// 4. INFORMA al servidor (v1.33.0): cada 15 min —y al minuto si hubo un ERROR— sube a
+//    POST /api/tracker/salud la última medición, el pico, los contadores y los AVISO/ERROR nuevos
+//    del diario, con el token del rastreador (sin vincular, no sube nada). Ajustes › Sistema ›
+//    Salud de la app lo enseña equipo por equipo. Sin red, los avisos esperan (hasta 100) y van
+//    en el siguiente informe. Las líneas INFO y el CSV no salen del equipo.
 
 use std::{
     collections::HashMap,
@@ -52,6 +58,13 @@ static REINICIANDO: AtomicBool = AtomicBool::new(false);
 static ULTIMA: Mutex<Option<Muestra>> = Mutex::new(None);
 static RECARGAS: OnceLock<Mutex<HashMap<String, Vec<Instant>>>> = OnceLock::new();
 static VISTOS_JS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+// Avisos y errores aún no entregados al servidor, y la hora de arranque para el informe.
+static PENDIENTES: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new());
+static URGENTE: AtomicBool = AtomicBool::new(false);
+static ARRANQUE: OnceLock<String> = OnceLock::new();
+const PENDIENTES_MAX: usize = 100;
+const INFORME_CADA: u32 = 15; // minutos (vueltas del hilo de medición)
+const INFORME_API: &str = "https://os.labstreamsas.com/api/tracker/salud";
 
 #[derive(Clone, Copy, Default)]
 pub struct Muestra {
@@ -100,7 +113,20 @@ pub fn anotar(nivel: &str, origen: &str, msg: &str) {
         ERRORES.fetch_add(1, Ordering::Relaxed);
     }
     let msg = msg.replace(['\r', '\n'], " ");
-    anexar("salud.log", LOG_MAX, &format!("{} {nivel:<5} {origen}: {msg}", ahora_iso()));
+    let en = ahora_iso();
+    anexar("salud.log", LOG_MAX, &format!("{en} {nivel:<5} {origen}: {msg}"));
+    if nivel == "AVISO" || nivel == "ERROR" {
+        if let Ok(mut p) = PENDIENTES.lock() {
+            if p.len() >= PENDIENTES_MAX {
+                p.remove(0); // días sin red: se suelta lo más viejo
+            }
+            let msg: String = msg.chars().take(400).collect();
+            p.push(serde_json::json!({ "en": en, "nivel": nivel, "origen": origen, "msg": msg }));
+        }
+        if nivel == "ERROR" {
+            URGENTE.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Error de JavaScript de una pestaña. El mismo mensaje no se repite más de una vez por minuto.
@@ -150,6 +176,7 @@ pub fn preparar<R: Runtime>(app: &AppHandle<R>) {
         .unwrap_or_else(|_| std::env::temp_dir().join("labstream-os-logs"));
     let _ = fs::create_dir_all(&dir);
     let _ = DIR.set(dir.clone());
+    let _ = ARRANQUE.set(ahora_iso());
 
     let anterior = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -221,8 +248,12 @@ pub fn iniciar<R: Runtime>(app: &AppHandle<R>, item: MenuItem<R>, memoria_alta: 
             let mut medidor = Medidor::default();
             let mut ultimo_aviso: Option<Instant> = None;
             let mut pico = 0u64;
+            let mut pico_total = 0u64;
+            let mut vuelta = 0u32;
+            let mut ultimo_informe: Option<Instant> = None;
             loop {
                 std::thread::sleep(MUESTRA_CADA);
+                vuelta += 1;
                 // Primero la memoria (memoria.rs): niveles de las vistas y, si toca, reciclar el
                 // proceso gráfico. Luego se mide, para que la muestra ya refleje lo liberado.
                 crate::memoria::ajustar_niveles(&h);
@@ -230,14 +261,16 @@ pub fn iniciar<R: Runtime>(app: &AppHandle<R>, item: MenuItem<R>, memoria_alta: 
                 let Some(m) = medidor.medir() else { continue };
                 *ULTIMA.lock().unwrap() = Some(m);
                 let (pestanas, dormidas, descartadas) = conteo_pestanas(&h);
-                anexar(
-                    "recursos.csv",
-                    CSV_MAX,
-                    &format!(
-                        "{},{},{},{:.1},{},{},{},{},{}",
-                        ahora_iso(), m.procesos, m.memoria_mb, m.cpu, pestanas, dormidas, descartadas, reparto.gpu_mb, reparto.pestanas_mb
-                    ),
-                );
+                if m.procesos > 0 {
+                    anexar(
+                        "recursos.csv",
+                        CSV_MAX,
+                        &format!(
+                            "{},{},{},{:.1},{},{},{},{},{}",
+                            ahora_iso(), m.procesos, m.memoria_mb, m.cpu, pestanas, dormidas, descartadas, reparto.gpu_mb, reparto.pestanas_mb
+                        ),
+                    );
+                }
                 if m.memoria_mb > pico + 256 && m.memoria_mb > 1024 {
                     pico = m.memoria_mb;
                     anotar("INFO", "recursos", &format!("nuevo pico de memoria: {} MB en {} procesos ({pestanas} pestañas)", m.memoria_mb, m.procesos));
@@ -249,6 +282,15 @@ pub fn iniciar<R: Runtime>(app: &AppHandle<R>, item: MenuItem<R>, memoria_alta: 
                 }
                 // set_text despacha al hilo principal y espera: aquí, en un hilo propio, es seguro.
                 let _ = h.state::<SaludUi<R>>().0.set_text(resumen());
+                pico_total = pico_total.max(m.memoria_mb);
+                // El primero a los 2 min (ya hay medición estable), luego cada 15; tras un ERROR, en
+                // la vuelta siguiente, pero nunca dos informes en menos de un minuto.
+                let toca = vuelta == 2 || (vuelta > 2 && (vuelta - 2) % INFORME_CADA == 0);
+                let urgente = URGENTE.load(Ordering::Relaxed) && ultimo_informe.map(|t| t.elapsed() >= Duration::from_secs(55)).unwrap_or(true);
+                if toca || urgente {
+                    ultimo_informe = Some(Instant::now());
+                    informar(&h, m, (pestanas, dormidas, descartadas), reparto.gpu_mb, pico_total);
+                }
             }
         })
         .ok();
@@ -277,6 +319,42 @@ pub fn iniciar<R: Runtime>(app: &AppHandle<R>, item: MenuItem<R>, memoria_alta: 
             }
         })
         .ok();
+}
+
+/// Sube el informe de salud. Corre en el hilo de medición (bloquea como mucho 15 s, una vez cada
+/// 15 min). Si falla, los avisos siguen pendientes para el próximo.
+fn informar<R: Runtime>(app: &AppHandle<R>, m: Muestra, (pestanas, dormidas, descartadas): (usize, usize, usize), gpu_mb: u64, pico_mb: u64) {
+    let Some(token) = crate::tracker::token(app) else { return };
+    let eventos: Vec<serde_json::Value> = PENDIENTES.lock().map(|p| p.clone()).unwrap_or_default();
+    let cuantos = eventos.len();
+    let cuerpo = serde_json::json!({
+        "device": {
+            "hostname": gethostname::gethostname().to_string_lossy(),
+            "platform": std::env::consts::OS,
+            "version": app.package_info().version.to_string(),
+        },
+        "desde": ARRANQUE.get(),
+        "muestra": {
+            "procesos": m.procesos, "memoria_mb": m.memoria_mb, "cpu": m.cpu,
+            "pestanas": pestanas, "dormidas": dormidas, "descartadas": descartadas, "gpu_mb": gpu_mb,
+        },
+        "pico_mb": pico_mb,
+        "errores": ERRORES.load(Ordering::Relaxed),
+        "recuperaciones": RECUPERACIONES.load(Ordering::Relaxed),
+        "eventos": eventos,
+    });
+    let r = ureq::post(INFORME_API)
+        .set("Authorization", &format!("Bearer {token}"))
+        .timeout(Duration::from_secs(15))
+        .send_json(cuerpo);
+    if r.is_ok() {
+        // Solo se sueltan los que se mandaron: los que llegaron mientras tanto van en el próximo.
+        if let Ok(mut p) = PENDIENTES.lock() {
+            let n = cuantos.min(p.len());
+            p.drain(0..n);
+        }
+        URGENTE.store(false, Ordering::Relaxed);
+    }
 }
 
 fn conteo_pestanas<R: Runtime>(app: &AppHandle<R>) -> (usize, usize, usize) {
@@ -477,7 +555,9 @@ impl Medidor {
 #[cfg(not(windows))]
 impl Medidor {
     fn medir(&mut self) -> Option<Muestra> {
-        None // macOS: pendiente (proc_pidinfo); el equipo de edición es Windows
+        // macOS: pendiente (proc_pidinfo); el equipo de edición es Windows. Una muestra vacía (0
+        // procesos) deja seguir al bucle para que el informe al servidor lleve los avisos y errores.
+        Some(Muestra::default())
     }
 }
 

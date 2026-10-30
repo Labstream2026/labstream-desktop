@@ -115,8 +115,12 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   audio en curso, ni un editor de documentos (`/docs/`).
 
 - **Salud de la app** (v1.20.0, `src-tauri/src/salud.rs`): cuánto gasta de verdad, qué falla
-  y cómo se repone sola. Nada sale del equipo; todo queda en la carpeta de logs de la app
-  (⋮ ▸ *Abrir diagnóstico*, o desde la bandeja).
+  y cómo se repone sola. Todo queda en la carpeta de logs de la app (⋮ ▸ *Abrir diagnóstico*,
+  o desde la bandeja).
+  - **Informe al servidor** (v1.33.0): cada 15 min —al minuto si hubo un ERROR— sube a
+    `POST /api/tracker/salud` la última medición, el pico, los contadores y los AVISO/ERROR del
+    diario, con el token del rastreador (sin vincular no sube nada). En el OS se ve en
+    Ajustes › Sistema › *Salud de la app*. Las líneas INFO y `recursos.csv` no salen del equipo.
   - **Recursos reales**: el exe es pequeño; el gasto está en la docena de procesos de WebView2
     que cuelgan de él (uno por pestaña, GPU, utilidad), que el Administrador de tareas reparte.
     Cada minuto se mide el árbol entero —memoria privada, CPU como la columna del Administrador

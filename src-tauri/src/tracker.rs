@@ -93,6 +93,12 @@ struct Nucleo {
 }
 
 struct NucleoState(Mutex<Nucleo>);
+
+/// El token del equipo, si está vinculado. salud.rs lo usa para subir su informe a
+/// /api/tracker/salud: mismo equipo, mismo token, sin pedir otra vinculación.
+pub(crate) fn token<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    app.try_state::<NucleoState>()?.0.lock().ok()?.cfg.token.clone()
+}
 struct MenuUi<R: Runtime> {
     estado: MenuItem<R>,
     toggle: MenuItem<R>,
