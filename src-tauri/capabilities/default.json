@@ -27,6 +27,7 @@
     "allow-ia-mantener",
     "allow-ia-ruido",
     "allow-resolve-lista",
-    "allow-resolve-lista-agregar"
+    "allow-resolve-lista-agregar",
+    "allow-resolve-lista-renombrar"
   ]
 }

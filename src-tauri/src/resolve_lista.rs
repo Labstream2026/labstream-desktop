@@ -13,6 +13,11 @@
 //!      añadido) y con una copia de la lista antes de tocarla. Solo AÑADE al final: las líneas que
 //!      ya estaban (también la base local «DISK») no se tocan.
 //!
+//! `resolve_lista_renombrar` (1.34, 4-nov-2026): una biblioteca que cambió de nombre en el servidor
+//! dejaba aquí una línea muerta, y si era la marcada Resolve se quedaba sin entrar. Reescribe esa línea
+//! con el nombre nuevo: la dirección, el usuario, la clave y la marca no cambian. Solo toca esas líneas,
+//! con las mismas reglas: Resolve cerrado y una copia antes.
+//!
 //! `vistas` (resolve-lista.json en la configuración de la app): lo que ya se vio alguna vez en la
 //! lista o se añadió. Si alguien quita una biblioteca a propósito desde Resolve, no se le vuelve a poner.
 
@@ -112,6 +117,51 @@ pub(crate) fn texto_a_anadir(actual: &str, nuevas: &[String]) -> String {
         s.push_str(salto);
     }
     s
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+pub struct Renombre {
+    de: String,
+    a: String,
+}
+
+/// La misma línea con otro nombre de base. Dirección, usuario, clave y la marca «*» se quedan.
+fn linea_con_otro_nombre(l: &str, de: &str, a: &str) -> String {
+    let cuerpo = l.trim_end_matches(['\r', '\n']);
+    let fin = &l[cuerpo.len()..];
+    let mut c: Vec<String> = cuerpo.split(':').map(String::from).collect();
+    if let Some(resto) = c[0].strip_prefix(de) {
+        c[0] = format!("{a}{resto}");
+    }
+    c[4] = a.to_string();
+    format!("{}{fin}", c.join(":"))
+}
+
+/// El texto de la lista con los cambios de nombre, y cuáles aplicó. Van en orden: A → B → C. Si la
+/// nueva ya estaba (la app anterior la añadió como una más), la vieja sobra y se quita. Todo lo demás
+/// sale idéntico, con sus saltos de línea.
+pub(crate) fn cambiar_nombres(actual: &str, renombres: &[Renombre]) -> (String, Vec<Renombre>) {
+    let mut lineas: Vec<String> = actual.split_inclusive('\n').map(String::from).collect();
+    let mut hechos: Vec<Renombre> = Vec::new();
+    for r in renombres.iter().take(50) {
+        if !nombre_valido(&r.de) || !nombre_valido(&r.a) {
+            continue;
+        }
+        let bases: BTreeSet<String> = lineas.iter().filter_map(|l| leer_linea(l)).map(|l| l.base).collect();
+        if !bases.contains(&r.de) {
+            continue;
+        }
+        let ya_esta = bases.contains(&r.a);
+        lineas = lineas
+            .into_iter()
+            .filter_map(|l| match leer_linea(&l) {
+                Some(x) if x.base == r.de => (!ya_esta).then(|| linea_con_otro_nombre(&l, &r.de, &r.a)),
+                _ => Some(l),
+            })
+            .collect();
+        hechos.push(r.clone());
+    }
+    (lineas.concat(), hechos)
 }
 
 // ── Dónde está la lista y si Resolve está abierto ────────────────────────────────────────────
@@ -259,6 +309,23 @@ pub struct Agregado {
     copia: Option<String>,
 }
 
+/// Copia de la lista tal como estaba (se guardan las 5 últimas).
+fn copiar_lista(ruta: &Path) -> Result<PathBuf, String> {
+    let dir = ruta.parent().ok_or("La lista de Resolve no tiene carpeta.")?;
+    let sello = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let copia = dir.join(format!("{PREFIJO_COPIA}{sello}"));
+    std::fs::copy(ruta, &copia).map_err(|e| format!("No pude guardar la copia de la lista: {e}"))?;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        let mut copias: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(PREFIJO_COPIA))).collect();
+        copias.sort();
+        let sobran = copias.len().saturating_sub(COPIAS_QUE_SE_GUARDAN);
+        for p in copias.into_iter().take(sobran) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    Ok(copia)
+}
+
 fn agregar(ruta: Option<PathBuf>, vistas_en: Option<&Path>, paso: Paso, abierto: fn() -> bool) -> Result<Agregado, String> {
     let ruta = ruta.ok_or("Este sistema no tiene la lista de Resolve.")?;
     if abierto() {
@@ -281,19 +348,7 @@ fn agregar(ruta: Option<PathBuf>, vistas_en: Option<&Path>, paso: Paso, abierto:
         return Ok(Agregado { agregadas: vec![], copia: None });
     }
 
-    // Copia de la lista tal como estaba (se guardan las 5 últimas).
-    let dir = ruta.parent().ok_or("La lista de Resolve no tiene carpeta.")?;
-    let sello = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let copia = dir.join(format!("{PREFIJO_COPIA}{sello}"));
-    std::fs::copy(&ruta, &copia).map_err(|e| format!("No pude guardar la copia de la lista: {e}"))?;
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        let mut copias: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(PREFIJO_COPIA))).collect();
-        copias.sort();
-        let sobran = copias.len().saturating_sub(COPIAS_QUE_SE_GUARDAN);
-        for p in copias.into_iter().take(sobran) {
-            let _ = std::fs::remove_file(p);
-        }
-    }
+    let copia = copiar_lista(&ruta)?;
 
     // Última comprobación justo antes de escribir: si Resolve se abrió mientras tanto, nada.
     if abierto() {
@@ -318,6 +373,54 @@ pub async fn resolve_lista_agregar<R: Runtime>(app: AppHandle<R>, paso: Paso) ->
     })
     .await
     .map_err(|e| format!("No pude añadir las bibliotecas: {e}"))?
+}
+
+#[derive(Serialize)]
+pub struct Renombrado {
+    renombradas: Vec<String>,
+    copia: Option<String>,
+}
+
+fn renombrar(ruta: Option<PathBuf>, vistas_en: Option<&Path>, renombres: &[Renombre], abierto: fn() -> bool) -> Result<Renombrado, String> {
+    const ABIERTO: &str = "Resolve está abierto: se cambian cuando lo cierres.";
+    let ruta = ruta.ok_or("Este sistema no tiene la lista de Resolve.")?;
+    if abierto() {
+        return Err(ABIERTO.into());
+    }
+    let actual = std::fs::read_to_string(&ruta).map_err(|e| format!("No pude leer la lista de Resolve: {e}"))?;
+    let (texto, hechos) = cambiar_nombres(&actual, renombres);
+    if hechos.is_empty() {
+        return Ok(Renombrado { renombradas: vec![], copia: None });
+    }
+    let copia = copiar_lista(&ruta)?;
+    // Última comprobación justo antes de escribir: si Resolve se abrió mientras tanto, nada.
+    if abierto() {
+        return Err(ABIERTO.into());
+    }
+    // Aparte y de un golpe: si esto se corta a medias, la lista sigue entera.
+    let temporal = ruta.with_extension("labstream-nueva");
+    std::fs::write(&temporal, &texto).map_err(|e| format!("No pude escribir en la lista de Resolve: {e}"))?;
+    std::fs::rename(&temporal, &ruta).map_err(|e| format!("No pude escribir en la lista de Resolve: {e}"))?;
+
+    // El nombre viejo deja de contar como visto: si un día vuelve, tiene que poder entrar.
+    let mut v = leer_vistas(vistas_en);
+    for r in &hechos {
+        v.vistas.remove(&r.de);
+        v.vistas.insert(r.a.clone());
+    }
+    guardar_vistas(vistas_en, &v);
+    Ok(Renombrado { renombradas: hechos.into_iter().map(|r| r.a).collect(), copia: copia.file_name().and_then(|n| n.to_str()).map(String::from) })
+}
+
+#[tauri::command]
+pub async fn resolve_lista_renombrar<R: Runtime>(app: AppHandle<R>, renombres: Vec<Renombre>) -> Result<Renombrado, String> {
+    let vistas = ruta_vistas(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _g = CANDADO.lock().unwrap_or_else(|e| e.into_inner());
+        renombrar(ruta_lista(), vistas.as_deref(), &renombres, resolve_abierto)
+    })
+    .await
+    .map_err(|e| format!("No pude cambiar los nombres: {e}"))?
 }
 
 #[cfg(test)]
@@ -405,6 +508,75 @@ mod pruebas {
         true
     }
     const LISTA: &str = "Local Database:C/x:y:z:w:DISK\r\nCamilo_Ortega192.168.0.22:192.168.0.22:camilo:k1:Camilo_Ortega:QPSQL\r\n";
+
+    fn r(de: &str, a: &str) -> Renombre {
+        Renombre { de: de.into(), a: a.into() }
+    }
+
+    #[test]
+    fn cambia_el_nombre_y_conserva_direccion_usuario_clave_y_marca() {
+        let antes = "Viejo192.168.0.22:192.168.0.22:camilo*:k1:Viejo:QPSQL\r\nOtra1:1:camilo:k1:Otra:QPSQL\r\n";
+        let (texto, hechos) = cambiar_nombres(antes, &[r("Viejo", "Nuevo")]);
+        assert_eq!(texto, "Nuevo192.168.0.22:192.168.0.22:camilo*:k1:Nuevo:QPSQL\r\nOtra1:1:camilo:k1:Otra:QPSQL\r\n");
+        assert_eq!(hechos, vec![r("Viejo", "Nuevo")]);
+    }
+
+    #[test]
+    fn un_primer_campo_que_no_empieza_por_la_base_se_respeta() {
+        let (texto, _) = cambiar_nombres("Mi biblioteca:1:ana:k:Viejo:QPSQL", &[r("Viejo", "Nuevo")]);
+        assert_eq!(texto, "Mi biblioteca:1:ana:k:Nuevo:QPSQL");
+    }
+
+    #[test]
+    fn la_base_local_y_lo_que_no_esta_no_se_tocan() {
+        let (texto, hechos) = cambiar_nombres(LISTA, &[r("Otra", "Nueva"), r("Local Database", "Otra")]);
+        assert_eq!(texto, LISTA);
+        assert!(hechos.is_empty());
+    }
+
+    #[test]
+    fn va_en_orden_y_si_la_nueva_ya_estaba_la_vieja_sobra() {
+        let (texto, hechos) = cambiar_nombres("A1:1:u:k:A:QPSQL\n", &[r("A", "B"), r("B", "C")]);
+        assert_eq!(texto, "C1:1:u:k:C:QPSQL\n");
+        assert_eq!(hechos.len(), 2);
+        let (texto, _) = cambiar_nombres("A1:1:u*:k:A:QPSQL\nB1:1:u:k:B:QPSQL\n", &[r("A", "B")]);
+        assert_eq!(texto, "B1:1:u:k:B:QPSQL\n");
+    }
+
+    #[test]
+    fn un_nombre_que_rompe_la_lista_no_pasa() {
+        let (texto, hechos) = cambiar_nombres(LISTA, &[r("Camilo_Ortega", "a:b"), r("Camilo_Ortega", "postgres")]);
+        assert_eq!(texto, LISTA);
+        assert!(hechos.is_empty());
+    }
+
+    #[test]
+    fn renombra_con_copia_y_al_dia_lo_visto() {
+        let d = carpeta("renombrar");
+        let (lista, vistas) = (d.join("dblist.conf"), d.join("vistas.json"));
+        std::fs::write(&lista, LISTA).unwrap();
+        mirar(Some(lista.clone()), Some(&vistas), cerrado);
+        let h = renombrar(Some(lista.clone()), Some(&vistas), &[r("Camilo_Ortega", "Camilo_O")], cerrado).unwrap();
+        assert_eq!(h.renombradas, vec!["Camilo_O".to_string()]);
+        let texto = std::fs::read_to_string(&lista).unwrap();
+        assert!(texto.contains("Camilo_O192.168.0.22:192.168.0.22:camilo:k1:Camilo_O:QPSQL\r\n"), "{texto}");
+        assert!(texto.starts_with("Local Database:C/x:y:z:w:DISK\r\n"));
+        assert_eq!(std::fs::read_to_string(d.join(h.copia.unwrap())).unwrap(), LISTA);
+        let v = std::fs::read_to_string(&vistas).unwrap();
+        assert!(v.contains("Camilo_O") && !v.contains("Camilo_Ortega"), "{v}");
+        assert!(!d.join("dblist.labstream-nueva").exists());
+    }
+
+    #[test]
+    fn con_resolve_abierto_no_renombra_ni_sin_nada_que_hacer_escribe() {
+        let d = carpeta("renombrar-abierto");
+        let lista = d.join("dblist.conf");
+        std::fs::write(&lista, LISTA).unwrap();
+        assert!(renombrar(Some(lista.clone()), None, &[r("Camilo_Ortega", "Camilo_O")], abierto).is_err());
+        assert_eq!(std::fs::read_to_string(&lista).unwrap(), LISTA);
+        let h = renombrar(Some(lista.clone()), None, &[r("Otra", "Nueva")], cerrado).unwrap();
+        assert!(h.renombradas.is_empty() && h.copia.is_none());
+    }
 
     #[test]
     fn mira_sin_claves_y_anota_lo_visto() {
