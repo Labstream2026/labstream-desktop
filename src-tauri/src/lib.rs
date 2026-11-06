@@ -40,6 +40,7 @@ mod salud;
 mod memoria;
 mod ia;
 mod resolve_lista;
+mod carpeta;
 
 use std::{
     collections::HashMap,
@@ -2179,6 +2180,29 @@ pub fn run() {
                 if let Some(n) = field_i64(e.payload(), "n") {
                     activate_nth(&h, n.max(1) as usize);
                 }
+            });
+            // v1.35.0: abrir en el Finder o el Explorador una carpeta de un disco de trabajo (carpeta.rs).
+            // La web manda servidores, recurso y carpeta; la ruta se arma aquí. Contesta con
+            // `ls-carpeta-abierta` { ok, montando?, error? }. En un hilo: sondea la red.
+            let h = handle.clone();
+            handle.listen_any("ls-abrir-carpeta", move |e| {
+                let pedido = carpeta::leer(e.payload());
+                let h = h.clone();
+                std::thread::spawn(move || {
+                    let respuesta = match pedido.as_ref().map(carpeta::resolver) {
+                        None => json!({ "ok": false, "error": "Ese disco no tiene servidor o recurso compartido en el OS." }),
+                        Some(carpeta::Resultado::Fallo(error)) => json!({ "ok": false, "error": error }),
+                        Some(carpeta::Resultado::Ruta(ruta)) => match h.opener().open_path(ruta.clone(), None::<&str>) {
+                            Ok(_) => json!({ "ok": true }),
+                            Err(err) => json!({ "ok": false, "error": format!("No se pudo abrir {ruta}: {err}") }),
+                        },
+                        Some(carpeta::Resultado::Montar(url)) => match h.opener().open_url(url, None::<&str>) {
+                            Ok(_) => json!({ "ok": true, "montando": true }),
+                            Err(err) => json!({ "ok": false, "error": format!("No se pudo conectar el disco: {err}") }),
+                        },
+                    };
+                    let _ = h.emit("ls-carpeta-abierta", respuesta);
+                });
             });
             let h = handle.clone();
             handle.listen_any("ls-nav", move |e| {
