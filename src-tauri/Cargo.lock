@@ -2367,7 +2367,7 @@ dependencies = [
 
 [[package]]
 name = "labstream-desktop"
-version = "1.36.2"
+version = "1.37.0"
 dependencies = [
  "active-win-pos-rs",
  "base64 0.22.1",

@@ -65,6 +65,9 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_opener::OpenerExt;
+// Solo lo usa el manejador de ventanas nuevas, que en macOS no se registra (ver montar_webview).
+#[cfg(windows)]
+use tauri::webview::NewWindowResponse;
 
 const SERVER_URL: &str = "https://os.labstreamsas.com";
 
@@ -82,8 +85,77 @@ fn is_google_host(host: &str) -> bool {
     GOOGLE_HOSTS.iter().any(|d| h == *d || h.ends_with(&format!(".{}", d)))
 }
 
+// Solo https://os.labstreamsas.com abre en pestaña. El esquema se exige aparte: Url::origin de un
+// blob:https://os…/x es el del enlace de dentro (url-2.5.8/src/origin.rs:20-26), y hasta la 1.36
+// ese blob: contaba como pestaña interna.
 fn es_pestana_interna(target: &Url, server: &Url) -> bool {
-    target.origin() == server.origin()
+    target.scheme() == server.scheme() && target.origin() == server.origin()
+}
+
+// ── VENTANAS NUEVAS que el script de la pestaña no atrapó (1.37, solo Windows) ──
+// iframes (OnlyOffice, editor de propuestas), Mayús+clic, «Abrir en ventana nueva» del menú,
+// formularios con target=_blank. Hasta la 1.36 se perdían sin aviso.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, PartialEq)]
+enum DestinoVentana {
+    // De la app (mismo esquema y origen): pestaña nueva.
+    Pestana,
+    // http(s) de fuera: navegador del sistema.
+    Navegador,
+    // about:blank, blob:, data:, javascript:, file:, mailto:, ms-settings:, photolab:… no abren
+    // nada: open_url desde Rust no pasa por el ACL del opener, así que este es el único filtro
+    // que impide a una página (o a un iframe de terceros) lanzar programas locales.
+    Nada,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn destino_de_ventana(url: &Url, server: &Url) -> DestinoVentana {
+    if !matches!(url.scheme(), "http" | "https") {
+        DestinoVentana::Nada
+    } else if es_pestana_interna(url, server) {
+        DestinoVentana::Pestana
+    } else {
+        DestinoVentana::Navegador
+    }
+}
+
+// Freno de ráfagas. NewWindowFeatures no dice si la ventana la pidió la persona con un clic
+// (tauri-runtime-2.11.3/src/webview.rs:124-128): sin tope, una página que abre ventanas en bucle
+// llenaría la barra de pestañas o el navegador.
+#[cfg_attr(not(windows), allow(dead_code))]
+const RAFAGA_MAX: usize = 6;
+#[cfg_attr(not(windows), allow(dead_code))]
+const RAFAGA_VENTANA: Duration = Duration::from_secs(10);
+// (aperturas recientes, ya se avisó de esta ráfaga)
+#[cfg_attr(not(windows), allow(dead_code))]
+static RAFAGA: Mutex<(Vec<Instant>, bool)> = Mutex::new((Vec::new(), false));
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn admitir_en(abiertas: &mut Vec<Instant>, ahora: Instant) -> bool {
+    abiertas.retain(|t| ahora.duration_since(*t) < RAFAGA_VENTANA);
+    if abiertas.len() >= RAFAGA_MAX {
+        return false;
+    }
+    abiertas.push(ahora);
+    true
+}
+
+// `que` es solo el tipo de destino ("pestaña" o "navegador"). NUNCA se anota la URL: puede llevar
+// un token, un enlace firmado o el texto de un WhatsApp, y los AVISO se mandan al servidor
+// (salud.rs, anotar).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn admitir_ventana(que: &str) -> bool {
+    let mut g = RAFAGA.lock().unwrap_or_else(|e| e.into_inner());
+    let (abiertas, avisada) = &mut *g;
+    if admitir_en(abiertas, Instant::now()) {
+        *avisada = false;
+        return true;
+    }
+    if !*avisada {
+        *avisada = true;
+        salud::anotar("AVISO", "ventanas", &format!("una página pidió demasiadas ventanas seguidas ({que}): se ignoran unos segundos"));
+    }
+    false
 }
 
 // El color que pide una página para su pestaña: solo `#rrggbb` (va a un estilo de la barra; nada
@@ -197,6 +269,56 @@ mod navigation_tests {
             assert_eq!(nombre_de_ventana(malo), None, "{malo}");
         }
         assert_eq!(nombre_de_ventana(&format!("ls-{}", "a".repeat(80))), None);
+    }
+
+    #[test]
+    fn ventanas_nuevas_van_a_pestana_navegador_o_nada() {
+        let s = Url::parse(SERVER_URL).unwrap();
+        let destino = |u: &str| destino_de_ventana(&Url::parse(u).unwrap(), &s);
+        assert_eq!(destino("https://os.labstreamsas.com/docs/file/1"), DestinoVentana::Pestana);
+        for url in [
+            "https://docs.labstreamsas.com/cache/x.pdf",
+            "https://wa.me/573001234567?text=hola",
+            "http://os.labstreamsas.com/",
+            "https://os.labstreamsas.com.evil.example/",
+            "https://helpcenter.onlyoffice.com/",
+        ] {
+            assert_eq!(destino(url), DestinoVentana::Navegador, "{url}");
+        }
+        // Nada que no sea http(s) sale de la app: ni programas locales ni páginas sin dirección.
+        for url in [
+            "about:blank",
+            "blob:https://os.labstreamsas.com/0b1c",
+            "data:text/html,x",
+            "javascript:alert(1)",
+            "file:///C:/x.exe",
+            "ms-settings:privacy",
+            "mailto:a@b.co",
+            "photolab://open?code=1",
+        ] {
+            assert_eq!(destino(url), DestinoVentana::Nada, "{url}");
+        }
+    }
+
+    #[test]
+    fn blob_de_la_app_no_es_pestana() {
+        let s = Url::parse(SERVER_URL).unwrap();
+        // Url::origin de un blob: es el del enlace de dentro: sin mirar el esquema, contaba como la app.
+        let blob = Url::parse("blob:https://os.labstreamsas.com/0b1c").unwrap();
+        assert_eq!(blob.origin(), s.origin());
+        assert!(!es_pestana_interna(&blob, &s));
+    }
+
+    #[test]
+    fn una_pagina_no_abre_ventanas_sin_fin() {
+        let t0 = Instant::now();
+        let mut h = Vec::new();
+        for i in 0..RAFAGA_MAX {
+            assert!(admitir_en(&mut h, t0 + Duration::from_millis(i as u64)), "{i}");
+        }
+        assert!(!admitir_en(&mut h, t0 + Duration::from_secs(1)));
+        // Pasada la ventana de tiempo, vuelve a dejar.
+        assert!(admitir_en(&mut h, t0 + RAFAGA_VENTANA + Duration::from_millis(10)));
     }
 }
 const TAB_BAR_H: f64 = 40.0; // alto lógico de la barra de pestañas (chrome)
@@ -373,6 +495,10 @@ fn save_persisted<R: Runtime>(app: &AppHandle<R>) {
 // - Reporta título/URL a la barra (observer del <title> + pushState del SPA).
 // - Atajos de teclado (en macOS los consume antes el menú nativo; esto cubre Windows y extras)
 //   y Ctrl+rueda para zoom.
+// - window.open("about:blank") o sin dirección → ventanaDiferida: se abre donde toca cuando la
+//   página le pone dirección.
+// - Lo que este script no atrapa (iframes, Mayús+clic, menú contextual, formularios) lo recoge
+//   on_new_window en Rust (montar_webview; solo en Windows).
 // SOLO debe gobernar el documento principal de NUESTRO origen; ver la guarda de abajo.
 const INIT_JS_TPL: &str = r#"
 (function () {
@@ -597,9 +723,36 @@ const INIT_JS_TPL: &str = r#"
     if (isInterno(u)) { e.preventDefault(); newTab(u.href); }
   }, true);
 
+  // ── Ventana «en blanco» ──
+  // labstream-os enviar-dialog.tsx:62-69 abre about:blank YA, dentro del clic, y cuando responde
+  // el servidor le pone location.href = wa.me/…. En la app no hay ventanas sueltas: WebView2
+  // devolvía una ventana de mentira que no carga nada y WhatsApp no se abría. Se devuelve un
+  // sustituto que abre donde toca (otro origen → navegador; la app → pestaña). Solo cuenta la
+  // PRIMERA dirección http(s); javascript:, data: y similares se ignoran. `closed` solo pasa a
+  // true con close(): el código que vigila `w.closed` no debe creer que la persona la cerró.
+  // No tiene `document`: un w.document.write(...) fallaría (el OS no lo usa).
+  function ventanaDiferida(nombre) {
+    var cerrada = false, usada = false;
+    function ir(h) {
+      if (cerrada || usada) return;
+      var u = abs(String(h));
+      if (isExt(u)) { usada = true; openExternal(u.href); }
+      else if (isInterno(u)) { usada = true; newTab(u.href, nombre); }
+    }
+    var loc = { assign: ir, replace: ir, reload: function () {}, toString: function () { return 'about:blank'; } };
+    var w = { opener: null, focus: function () {}, blur: function () {}, postMessage: function () {}, close: function () { cerrada = true; } };
+    try {
+      Object.defineProperty(loc, 'href', { get: function () { return 'about:blank'; }, set: ir, enumerable: true });
+      Object.defineProperty(w, 'location', { get: function () { return loc; }, set: ir, enumerable: true });
+      Object.defineProperty(w, 'closed', { get: function () { return cerrada; }, enumerable: true });
+    } catch (e) {}
+    return w;
+  }
+
   var _open = window.open;
   window.open = function (url, name, feats) {
     var u = url ? abs(url) : null;
+    if (!url || (u && u.protocol === 'about:')) return ventanaDiferida(nombreVentana(name));
     if (isExt(u)) { openExternal(u.href); return null; }
     if (isInterno(u)) { newTab(u.href, nombreVentana(name)); return null; }
     return _open ? _open.call(window, url, name, feats) : null;
@@ -1103,6 +1256,43 @@ fn montar_webview<R: Runtime>(app: &AppHandle<R>, label: &str, parsed: Url) -> t
             }
             set_loading(&app_zoom, wv.label(), cargando);
         });
+    // Toda ventana nueva que el script de la pestaña no atrapó. Sin manejador, wry la descarta
+    // (SetHandled(true), wry-0.55.1/src/webview2/mod.rs:782). Siempre Deny: nunca una ventana
+    // nativa suelta, sin barra, sin el script del shell y fuera del control de pestañas.
+    // SOLO en Windows: en macOS, con manejador, el delegado de wry hace unwrap() de la URL y de la
+    // pantalla de la ventana (wry-0.55.1/src/wkwebview/class/wry_web_view_ui_delegate.rs:150-153),
+    // y una ventana rara desde un iframe podría tumbar la app. Allí todo queda como en la 1.36.
+    #[cfg(windows)]
+    let builder = {
+        let app_ventana = app.clone();
+        builder.on_new_window(move |url, _features| {
+            let Ok(server) = Url::parse(SERVER_URL) else { return NewWindowResponse::Deny };
+            match destino_de_ventana(&url, &server) {
+                DestinoVentana::Pestana => {
+                    if admitir_ventana("pestaña") {
+                        let h = app_ventana.clone();
+                        let u = url.to_string();
+                        // En otro hilo: esto corre en el hilo principal, dentro de un mensaje de
+                        // WebView2 (dispatch_handler, wry-0.55.1/src/webview2/mod.rs:763-766), y
+                        // así el manejador responde ya y la pestaña se monta después, por la cola
+                        // normal de Tauri. La pestaña se crea activa, como ls-new-tab. El nombre
+                        // `ls-…` de la ventana no llega aquí (NewWindowFeatures solo trae tamaño,
+                        // posición y opener): no se reutiliza ninguna pestaña con nombre.
+                        std::thread::spawn(move || {
+                            crear_pestana(&h, Some(u), true, None);
+                        });
+                    }
+                }
+                DestinoVentana::Navegador => {
+                    if admitir_ventana("navegador") {
+                        let _ = app_ventana.opener().open_url(url.as_str(), None::<&str>);
+                    }
+                }
+                DestinoVentana::Nada => {}
+            }
+            NewWindowResponse::Deny
+        })
+    };
 
     let wv = win.add_child(
         builder,

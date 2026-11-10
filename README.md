@@ -105,9 +105,22 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
 - **Zoom de interfaz**: ⌘/Ctrl `+` / `−` / `0` y Ctrl+rueda, con indicador en la
   barra y **persistencia** entre sesiones (50%–250%).
 - **Documentos dentro de la app**: los visores/editores del propio servidor
-  (OnlyOffice, PDFs, reproductor de revisión) abren en pestañas; solo lo de OTRO
-  origen (Drive…) sale al **navegador del sistema**. El **login por Authentik**
-  sigue funcionando dentro.
+  (OnlyOffice, PDFs, reproductor de revisión) abren en pestañas; lo de OTRO
+  origen que se abre con un enlace o en una ventana nueva (Drive, WhatsApp,
+  enlaces para clientes…) sale al **navegador del sistema**. Si la página navega
+  o redirige SOLA a otro sitio, la pestaña la sigue como siempre (salvo Google,
+  que sale al navegador). El **login por Authentik** sigue funcionando dentro.
+- **Ventanas nuevas** (v1.37.0): `window.open("about:blank")` (o sin dirección)
+  devuelve una ventana que se abre donde toca cuando la página le da dirección:
+  de fuera, en el navegador; de la app, en una pestaña (así funciona «Enviar por
+  WhatsApp personal»). Solo cuenta la primera dirección http(s). En **Windows**,
+  además, ya no se pierde ninguna: lo que la página no atrapa (iframes como
+  OnlyOffice o el editor de propuestas, Mayús+clic, «Abrir en ventana nueva» del
+  menú) va a una pestaña si es de la app y al navegador si es de fuera;
+  `about:blank`, `blob:`, `data:`, `file:` y los protocolos locales no abren
+  nada, y como mucho 6 ventanas cada 10 s. En **macOS** eso último sigue como en
+  la 1.36: con manejador, wry hace `unwrap()` dentro del delegado de WebKit y una
+  ventana rara podría tumbar la app.
 - **Notas de voz / cámara**: pide permiso de micrófono y cámara (entitlements de macOS).
 - **Descargas** (entregables, exportaciones) con el diálogo nativo de guardado.
 - **Bandeja del sistema**: cerrar la ventana la oculta; la app sigue notificando.
