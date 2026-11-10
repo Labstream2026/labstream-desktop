@@ -116,11 +116,16 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   WhatsApp personal»). Solo cuenta la primera dirección http(s). En **Windows**,
   además, ya no se pierde ninguna: lo que la página no atrapa (iframes como
   OnlyOffice o el editor de propuestas, Mayús+clic, «Abrir en ventana nueva» del
-  menú) va a una pestaña si es de la app y al navegador si es de fuera;
-  `about:blank`, `blob:`, `data:`, `file:` y los protocolos locales no abren
-  nada, y como mucho 6 ventanas cada 10 s. En **macOS** eso último sigue como en
-  la 1.36: con manejador, wry hace `unwrap()` dentro del delegado de WebKit y una
-  ventana rara podría tumbar la app.
+  menú, formularios GET con `target`) va a una pestaña si es de la app y al
+  navegador si es de fuera; `about:blank`, `blob:`, `data:`, `file:` y los
+  protocolos locales no abren nada. Solo se abre si la pidió la persona con un
+  clic o una tecla (`IsUserInitiated` de WebView2, que no trae bloqueador de
+  ventanas emergentes): un iframe que llama a `window.open` desde un temporizador
+  no abre nada. Y cada pestaña tiene su freno: como mucho 6 ventanas cada 10 s y,
+  si se pasa, ninguna más hasta 10 s sin pedir. Un formulario POST con `target`
+  no se recupera: solo llega la dirección y saldría como un GET sin sus campos.
+  En **macOS** todo esto sigue como en la 1.36: con manejador, wry hace
+  `unwrap()` dentro del delegado de WebKit y una ventana rara podría tumbar la app.
 - **Notas de voz / cámara**: pide permiso de micrófono y cámara (entitlements de macOS).
 - **Descargas** (entregables, exportaciones) con el diálogo nativo de guardado.
 - **Bandeja del sistema**: cerrar la ventana la oculta; la app sigue notificando.

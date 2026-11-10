@@ -45,7 +45,7 @@ mod carpetas_os;
 mod actualizar;
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::Mutex,
     time::{Duration, Instant},
@@ -93,10 +93,12 @@ fn es_pestana_interna(target: &Url, server: &Url) -> bool {
 }
 
 // ── VENTANAS NUEVAS que el script de la pestaña no atrapó (1.37, solo Windows) ──
-// iframes (OnlyOffice, editor de propuestas), Mayús+clic, «Abrir en ventana nueva» del menú,
-// formularios con target=_blank. Hasta la 1.36 se perdían sin aviso.
+// iframes (OnlyOffice, editor de propuestas), Mayús+clic, «Abrir en ventana nueva» del menú y
+// formularios GET con target=_blank. Hasta la 1.36 se perdían sin aviso. Un formulario POST con
+// target NO se recupera: on_new_window solo recibe la dirección y se volvería a abrir como un GET
+// sin sus campos (haría falta NewWindowResponse::Create con un webview propio).
 #[cfg_attr(not(windows), allow(dead_code))]
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 enum DestinoVentana {
     // De la app (mismo esquema y origen): pestaña nueva.
     Pestana,
@@ -119,43 +121,202 @@ fn destino_de_ventana(url: &Url, server: &Url) -> DestinoVentana {
     }
 }
 
-// Freno de ráfagas. NewWindowFeatures no dice si la ventana la pidió la persona con un clic
-// (tauri-runtime-2.11.3/src/webview.rs:124-128): sin tope, una página que abre ventanas en bucle
-// llenaría la barra de pestañas o el navegador.
+// ── ¿La pidió la persona? ──
+// NewWindowFeatures no lo dice (tauri-runtime-2.11.3/src/webview.rs:124-128), pero WebView2 sí:
+// IsUserInitiated es cierto si la ventana sale de un clic o una tecla (enlace con target,
+// window.open dentro de un onclick, Mayús+clic, el menú contextual) y falso si sale de un
+// temporizador o de una carga. WebView2 NO trae el bloqueador de ventanas emergentes de Edge y su
+// documentación pide usar este dato para hacer de bloqueador. Sin él, un iframe con
+// setInterval(() => open(…)) abriría pestañas activas (que roban el foco) o páginas en el
+// navegador sin fin. Lo lee un segundo manejador de NewWindowRequested (apuntar_gestos) y lo deja
+// aquí; el cierre de on_new_window corre DESPUÉS, porque wry lo aplaza con PostMessage
+// (dispatch_handler, wry-0.55.1/src/webview2/mod.rs:763-766), y lo recoge con tomar_gesto.
+#[cfg_attr(not(windows), allow(dead_code))]
+struct Pedida {
+    label: String,
+    url: String,
+    gesto: bool,
+    en: Instant,
+}
+// on_new_window la recoge en milisegundos; esto solo limpia las que nadie recogió (wry no llama a
+// on_new_window si falla GetDeferral, ni tauri si la dirección no es una URL).
+#[cfg_attr(not(windows), allow(dead_code))]
+const PEDIDA_CADUCA: Duration = Duration::from_secs(10);
+#[cfg_attr(not(windows), allow(dead_code))]
+const PEDIDAS_MAX: usize = 32;
+#[cfg_attr(not(windows), allow(dead_code))]
+static PEDIDAS: Mutex<Vec<Pedida>> = Mutex::new(Vec::new());
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn apuntar_pedida(lista: &mut Vec<Pedida>, p: Pedida) {
+    lista.retain(|x| p.en.duration_since(x.en) < PEDIDA_CADUCA);
+    if lista.len() >= PEDIDAS_MAX {
+        lista.remove(0);
+    }
+    lista.push(p);
+}
+
+// La primera apuntada de esa pestaña con esa dirección: si la página pide dos veces la misma, cada
+// una se lleva la suya, en orden. None = no se pudo leer (ver apuntar_gestos).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn tomar_gesto(lista: &mut Vec<Pedida>, label: &str, url: &str, ahora: Instant) -> Option<bool> {
+    lista.retain(|x| ahora.duration_since(x.en) < PEDIDA_CADUCA);
+    let i = lista.iter().position(|x| x.label == label && x.url == url)?;
+    Some(lista.remove(i).gesto)
+}
+
+// Freno de ráfagas, POR PESTAÑA. Aun con gesto hace falta: Intro mantenido sobre un enlace con
+// target pide decenas de ventanas por segundo. Como mucho RAFAGA_MAX cada RAFAGA_VENTANA; si se
+// pasa, el freno SALTA y no deja pasar nada hasta RAFAGA_VENTANA sin ninguna petición: un bucle
+// queda cortado mientras siga pidiendo, en vez de colar 6 cada 10 s. Y es de cada pestaña: lo que
+// haga una no gasta los huecos de las demás.
 #[cfg_attr(not(windows), allow(dead_code))]
 const RAFAGA_MAX: usize = 6;
 #[cfg_attr(not(windows), allow(dead_code))]
 const RAFAGA_VENTANA: Duration = Duration::from_secs(10);
-// (aperturas recientes, ya se avisó de esta ráfaga)
-#[cfg_attr(not(windows), allow(dead_code))]
-static RAFAGA: Mutex<(Vec<Instant>, bool)> = Mutex::new((Vec::new(), false));
 
 #[cfg_attr(not(windows), allow(dead_code))]
-fn admitir_en(abiertas: &mut Vec<Instant>, ahora: Instant) -> bool {
-    abiertas.retain(|t| ahora.duration_since(*t) < RAFAGA_VENTANA);
-    if abiertas.len() >= RAFAGA_MAX {
-        return false;
+#[derive(Default)]
+struct Freno {
+    abiertas: Vec<Instant>,  // admitidas en los últimos RAFAGA_VENTANA
+    ultima: Option<Instant>, // la última petición, admitida o no
+    saltado: bool,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, PartialEq)]
+enum Admision {
+    Si,
+    No,
+    // La que hace saltar el freno: se avisa una vez por racha.
+    Salta,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl Freno {
+    fn admitir(&mut self, ahora: Instant) -> Admision {
+        let silencio = self.ultima.map_or(true, |t| ahora.duration_since(t) >= RAFAGA_VENTANA);
+        self.ultima = Some(ahora);
+        if self.saltado && !silencio {
+            return Admision::No;
+        }
+        self.saltado = false;
+        self.abiertas.retain(|t| ahora.duration_since(*t) < RAFAGA_VENTANA);
+        if self.abiertas.len() >= RAFAGA_MAX {
+            self.saltado = true;
+            return Admision::Salta;
+        }
+        self.abiertas.push(ahora);
+        Admision::Si
     }
-    abiertas.push(ahora);
-    true
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn admitir_en(frenos: &mut BTreeMap<String, Freno>, label: &str, ahora: Instant) -> Admision {
+    // Las pestañas que llevan RAFAGA_VENTANA sin pedir nada (o que ya se cerraron) se olvidan.
+    frenos.retain(|l, f| l == label || f.ultima.is_some_and(|t| ahora.duration_since(t) < RAFAGA_VENTANA));
+    frenos.entry(label.to_string()).or_default().admitir(ahora)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+static FRENOS: Mutex<BTreeMap<String, Freno>> = Mutex::new(BTreeMap::new());
+// Pestañas de las que ya se anotó que pidieron ventanas sin gesto (una vez por pestaña: un bucle
+// no llena salud.log).
+#[cfg_attr(not(windows), allow(dead_code))]
+static SIN_GESTO: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, PartialEq)]
+enum Apertura {
+    // No es http(s): ni programas locales ni páginas sin dirección.
+    Nada,
+    // Sin clic ni tecla: como el bloqueador de ventanas emergentes del navegador.
+    SinGesto,
+    // Se pasó del freno de su pestaña.
+    Frenada,
+    // `activa` solo si consta el gesto: si no se pudo leer, la pestaña se crea detrás y no roba
+    // el foco.
+    Pestana { activa: bool },
+    Navegador,
+}
+
+// La decisión entera de on_new_window, sin efectos (salvo el freno que pasa `admitir`), para poder
+// probarla. Sin gesto no se llega a gastar el freno: un iframe en bucle no le quita huecos a los
+// clics de la persona en esa misma pestaña.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn decidir_ventana(destino: DestinoVentana, gesto: Option<bool>, admitir: impl FnOnce(&str) -> bool) -> Apertura {
+    let que = match destino {
+        DestinoVentana::Nada => return Apertura::Nada,
+        DestinoVentana::Pestana => "pestaña",
+        DestinoVentana::Navegador => "navegador",
+    };
+    if gesto == Some(false) {
+        return Apertura::SinGesto;
+    }
+    if !admitir(que) {
+        return Apertura::Frenada;
+    }
+    match destino {
+        DestinoVentana::Pestana => Apertura::Pestana { activa: gesto.is_some() },
+        _ => Apertura::Navegador,
+    }
 }
 
 // `que` es solo el tipo de destino ("pestaña" o "navegador"). NUNCA se anota la URL: puede llevar
 // un token, un enlace firmado o el texto de un WhatsApp, y los AVISO se mandan al servidor
 // (salud.rs, anotar).
 #[cfg_attr(not(windows), allow(dead_code))]
-fn admitir_ventana(que: &str) -> bool {
-    let mut g = RAFAGA.lock().unwrap_or_else(|e| e.into_inner());
-    let (abiertas, avisada) = &mut *g;
-    if admitir_en(abiertas, Instant::now()) {
-        *avisada = false;
-        return true;
+fn admitir_ventana(label: &str, que: &str) -> bool {
+    let admision = admitir_en(&mut FRENOS.lock().unwrap_or_else(|e| e.into_inner()), label, Instant::now());
+    if admision == Admision::Salta {
+        salud::anotar("AVISO", &format!("pestaña {label}"), &format!("una página pidió demasiadas ventanas seguidas ({que}): no se abre ninguna hasta 10 s sin pedir más"));
     }
-    if !*avisada {
-        *avisada = true;
-        salud::anotar("AVISO", "ventanas", &format!("una página pidió demasiadas ventanas seguidas ({que}): se ignoran unos segundos"));
+    admision == Admision::Si
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn ventana_sin_gesto(label: &str) {
+    if SIN_GESTO.lock().unwrap_or_else(|e| e.into_inner()).insert(label.to_string()) {
+        // INFO: se queda en salud.log y no va al servidor.
+        salud::anotar("INFO", &format!("pestaña {label}"), "una página pidió una ventana sin clic ni tecla: no se abre (se anota una vez por pestaña)");
     }
-    false
+}
+
+// El segundo manejador de NewWindowRequested (ver «¿La pidió la persona?»). No decide nada ni
+// toca SetHandled: solo apunta el gesto para on_new_window. Si no se puede registrar, tomar_gesto
+// devuelve None y la ventana sigue abriéndose, con el freno y sin activar la pestaña.
+#[cfg(windows)]
+fn apuntar_gestos<R: Runtime>(wv: &Webview<R>) {
+    let label = wv.label().to_string();
+    let _ = wv.with_webview(move |pw| unsafe {
+        use webview2_com::{take_pwstr, NewWindowRequestedEventHandler};
+        let registrado = pw.controller().CoreWebView2().and_then(|core| {
+            let handler = NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let mut uri = windows::core::PWSTR::null();
+                if args.Uri(&mut uri).is_err() {
+                    return Ok(());
+                }
+                // Igual que tauri-runtime-wry antes de llamar a on_new_window: la misma cadena
+                // pasada por Url::parse, para que tomar_gesto la encuentre.
+                let Ok(url) = Url::parse(&take_pwstr(uri)) else { return Ok(()) };
+                let mut gesto = windows::core::BOOL::default();
+                if args.IsUserInitiated(&mut gesto).is_err() {
+                    return Ok(());
+                }
+                apuntar_pedida(
+                    &mut PEDIDAS.lock().unwrap_or_else(|e| e.into_inner()),
+                    Pedida { label: label.clone(), url: url.into(), gesto: gesto.as_bool(), en: Instant::now() },
+                );
+                Ok(())
+            }));
+            let mut token = 0i64;
+            core.add_NewWindowRequested(&handler, &mut token)
+        });
+        if registrado.is_err() {
+            salud::anotar("AVISO", "ventanas", "no se pudo saber si las ventanas nuevas las pide la persona: se abren con el freno y sin activar la pestaña");
+        }
+    });
 }
 
 // El color que pide una página para su pestaña: solo `#rrggbb` (va a un estilo de la barra; nada
@@ -309,16 +470,95 @@ mod navigation_tests {
         assert!(!es_pestana_interna(&blob, &s));
     }
 
+    // Un bucle que pide una ventana cada `cada` durante `dura`, con o sin gesto, contra el freno de
+    // su pestaña. Devuelve cuántas se abren.
+    fn bucle(frenos: &mut BTreeMap<String, Freno>, label: &str, t0: Instant, cada: Duration, dura: Duration, gesto: Option<bool>) -> usize {
+        let mut abiertas = 0;
+        let mut t = t0;
+        while t < t0 + dura {
+            if decidir_ventana(DestinoVentana::Navegador, gesto, |_| admitir_en(frenos, label, t) == Admision::Si) == Apertura::Navegador {
+                abiertas += 1;
+            }
+            t += cada;
+        }
+        abiertas
+    }
+
     #[test]
     fn una_pagina_no_abre_ventanas_sin_fin() {
         let t0 = Instant::now();
-        let mut h = Vec::new();
-        for i in 0..RAFAGA_MAX {
-            assert!(admitir_en(&mut h, t0 + Duration::from_millis(i as u64)), "{i}");
+        let mut f = BTreeMap::new();
+        // setInterval(() => open(…), 500) en un iframe: sin gesto no abre ninguna, ni gasta el freno.
+        assert_eq!(bucle(&mut f, "tab-1", t0, Duration::from_millis(500), Duration::from_secs(60), Some(false)), 0);
+        assert!(f.is_empty());
+        // Aunque el gesto no se pudiera leer: la primera ráfaga entra y, mientras siga pidiendo,
+        // ni una más (antes: 6 cada 10 s, unas 36 por minuto).
+        assert_eq!(bucle(&mut f, "tab-1", t0, Duration::from_millis(500), Duration::from_secs(60), None), RAFAGA_MAX);
+        let t1 = t0 + Duration::from_secs(60);
+        assert_eq!(bucle(&mut f, "tab-2", t1, Duration::from_secs(1), Duration::from_secs(60), Some(true)), RAFAGA_MAX);
+        // El freno se suelta solo tras RAFAGA_VENTANA sin ninguna petición.
+        let ultima = t1 + Duration::from_secs(59);
+        let casi = ultima + RAFAGA_VENTANA - Duration::from_millis(500);
+        assert_eq!(admitir_en(&mut f, "tab-2", casi), Admision::No);
+        assert_eq!(admitir_en(&mut f, "tab-2", casi + RAFAGA_VENTANA), Admision::Si);
+    }
+
+    #[test]
+    fn el_freno_es_de_cada_pestana() {
+        let t0 = Instant::now();
+        let mut f = BTreeMap::new();
+        let mut avisos = 0;
+        for i in 0..40u64 {
+            match admitir_en(&mut f, "tab-1", t0 + Duration::from_millis(250 * i)) {
+                Admision::Salta => avisos += 1,
+                Admision::Si | Admision::No => {}
+            }
         }
-        assert!(!admitir_en(&mut h, t0 + Duration::from_secs(1)));
-        // Pasada la ventana de tiempo, vuelve a dejar.
-        assert!(admitir_en(&mut h, t0 + RAFAGA_VENTANA + Duration::from_millis(10)));
+        // Un solo aviso por racha.
+        assert_eq!(avisos, 1);
+        // Con tab-1 frenada, la persona abre ventanas desde otra pestaña sin problema.
+        let t = t0 + Duration::from_secs(10);
+        assert_eq!(admitir_en(&mut f, "tab-2", t), Admision::Si);
+        // Las pestañas que llevan RAFAGA_VENTANA sin pedir nada se olvidan.
+        admitir_en(&mut f, "tab-3", t + RAFAGA_VENTANA + Duration::from_secs(1));
+        assert_eq!(f.keys().map(String::as_str).collect::<Vec<_>>(), ["tab-3"]);
+    }
+
+    #[test]
+    fn decidir_ventana_mira_el_gesto() {
+        let si = |_: &str| true;
+        let no = |_: &str| false;
+        assert_eq!(decidir_ventana(DestinoVentana::Pestana, Some(true), si), Apertura::Pestana { activa: true });
+        // Sin poder leer el gesto: se abre, pero detrás, sin robar el foco.
+        assert_eq!(decidir_ventana(DestinoVentana::Pestana, None, si), Apertura::Pestana { activa: false });
+        assert_eq!(decidir_ventana(DestinoVentana::Navegador, Some(true), si), Apertura::Navegador);
+        assert_eq!(decidir_ventana(DestinoVentana::Navegador, Some(true), no), Apertura::Frenada);
+        // Sin gesto, ni se consulta el freno.
+        assert_eq!(decidir_ventana(DestinoVentana::Pestana, Some(false), |_: &str| -> bool { panic!("no debe gastar el freno") }), Apertura::SinGesto);
+        assert_eq!(decidir_ventana(DestinoVentana::Nada, Some(true), si), Apertura::Nada);
+    }
+
+    #[test]
+    fn el_gesto_se_recoge_por_pestana_y_direccion() {
+        let t0 = Instant::now();
+        let p = |label: &str, url: &str, gesto: bool, en: Instant| Pedida { label: label.into(), url: url.into(), gesto, en };
+        let mut l = Vec::new();
+        apuntar_pedida(&mut l, p("tab-1", "https://a.co/", false, t0));
+        apuntar_pedida(&mut l, p("tab-2", "https://a.co/", true, t0));
+        apuntar_pedida(&mut l, p("tab-1", "https://a.co/", true, t0));
+        // La misma dirección dos veces en la misma pestaña: cada una la suya, en orden.
+        assert_eq!(tomar_gesto(&mut l, "tab-1", "https://a.co/", t0), Some(false));
+        assert_eq!(tomar_gesto(&mut l, "tab-1", "https://a.co/", t0), Some(true));
+        assert_eq!(tomar_gesto(&mut l, "tab-1", "https://a.co/", t0), None);
+        assert_eq!(tomar_gesto(&mut l, "tab-2", "https://b.co/", t0), None);
+        // La que nadie recogió caduca.
+        assert_eq!(tomar_gesto(&mut l, "tab-2", "https://a.co/", t0 + PEDIDA_CADUCA), None);
+        assert!(l.is_empty());
+        // Y la lista no crece sin fin.
+        for _ in 0..PEDIDAS_MAX * 3 {
+            apuntar_pedida(&mut l, p("tab-1", "https://a.co/", false, t0));
+        }
+        assert_eq!(l.len(), PEDIDAS_MAX);
     }
 }
 const TAB_BAR_H: f64 = 40.0; // alto lógico de la barra de pestañas (chrome)
@@ -497,8 +737,9 @@ fn save_persisted<R: Runtime>(app: &AppHandle<R>) {
 //   y Ctrl+rueda para zoom.
 // - window.open("about:blank") o sin dirección → ventanaDiferida: se abre donde toca cuando la
 //   página le pone dirección.
-// - Lo que este script no atrapa (iframes, Mayús+clic, menú contextual, formularios) lo recoge
-//   on_new_window en Rust (montar_webview; solo en Windows).
+// - Lo que este script no atrapa (iframes, Mayús+clic, menú contextual, formularios GET con
+//   target) lo recoge on_new_window en Rust (montar_webview; solo en Windows), y solo si lo pidió
+//   la persona con un clic o una tecla.
 // SOLO debe gobernar el documento principal de NUESTRO origen; ver la guarda de abajo.
 const INIT_JS_TPL: &str = r#"
 (function () {
@@ -1262,33 +1503,34 @@ fn montar_webview<R: Runtime>(app: &AppHandle<R>, label: &str, parsed: Url) -> t
     // SOLO en Windows: en macOS, con manejador, el delegado de wry hace unwrap() de la URL y de la
     // pantalla de la ventana (wry-0.55.1/src/wkwebview/class/wry_web_view_ui_delegate.rs:150-153),
     // y una ventana rara desde un iframe podría tumbar la app. Allí todo queda como en la 1.36.
+    // Sin gesto de la persona (IsUserInitiated, ver apuntar_gestos) no se abre nada; con gesto, el
+    // freno es el de ESTA pestaña.
     #[cfg(windows)]
     let builder = {
         let app_ventana = app.clone();
+        let label_ventana = label.to_string();
         builder.on_new_window(move |url, _features| {
             let Ok(server) = Url::parse(SERVER_URL) else { return NewWindowResponse::Deny };
-            match destino_de_ventana(&url, &server) {
-                DestinoVentana::Pestana => {
-                    if admitir_ventana("pestaña") {
-                        let h = app_ventana.clone();
-                        let u = url.to_string();
-                        // En otro hilo: esto corre en el hilo principal, dentro de un mensaje de
-                        // WebView2 (dispatch_handler, wry-0.55.1/src/webview2/mod.rs:763-766), y
-                        // así el manejador responde ya y la pestaña se monta después, por la cola
-                        // normal de Tauri. La pestaña se crea activa, como ls-new-tab. El nombre
-                        // `ls-…` de la ventana no llega aquí (NewWindowFeatures solo trae tamaño,
-                        // posición y opener): no se reutiliza ninguna pestaña con nombre.
-                        std::thread::spawn(move || {
-                            crear_pestana(&h, Some(u), true, None);
-                        });
-                    }
+            let gesto = tomar_gesto(&mut PEDIDAS.lock().unwrap_or_else(|e| e.into_inner()), &label_ventana, url.as_str(), Instant::now());
+            match decidir_ventana(destino_de_ventana(&url, &server), gesto, |que| admitir_ventana(&label_ventana, que)) {
+                Apertura::Pestana { activa } => {
+                    let h = app_ventana.clone();
+                    let u = url.to_string();
+                    // En otro hilo: esto corre en el hilo principal, dentro de un mensaje de
+                    // WebView2 (dispatch_handler, wry-0.55.1/src/webview2/mod.rs:763-766), y así
+                    // el manejador responde ya y la pestaña se monta después, por la cola normal
+                    // de Tauri. Con gesto se crea activa, como ls-new-tab. El nombre `ls-…` de la
+                    // ventana no llega aquí (NewWindowFeatures solo trae tamaño, posición y
+                    // opener): no se reutiliza ninguna pestaña con nombre.
+                    std::thread::spawn(move || {
+                        crear_pestana(&h, Some(u), activa, None);
+                    });
                 }
-                DestinoVentana::Navegador => {
-                    if admitir_ventana("navegador") {
-                        let _ = app_ventana.opener().open_url(url.as_str(), None::<&str>);
-                    }
+                Apertura::Navegador => {
+                    let _ = app_ventana.opener().open_url(url.as_str(), None::<&str>);
                 }
-                DestinoVentana::Nada => {}
+                Apertura::SinGesto => ventana_sin_gesto(&label_ventana),
+                Apertura::Nada | Apertura::Frenada => {}
             }
             NewWindowResponse::Deny
         })
@@ -1301,6 +1543,8 @@ fn montar_webview<R: Runtime>(app: &AppHandle<R>, label: &str, parsed: Url) -> t
     )?;
     // Si su proceso de WebView2 muere o se cuelga, se anota y la pestaña se recarga sola.
     salud::vigilar_pestana(app, &wv);
+    #[cfg(windows)]
+    apuntar_gestos(&wv);
     Ok(wv)
 }
 
