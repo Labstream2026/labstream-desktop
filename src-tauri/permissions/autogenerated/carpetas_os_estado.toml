@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-carpetas-os-estado"
+description = "Enables the carpetas_os_estado command without any pre-configured scope."
+commands.allow = ["carpetas_os_estado"]
+
+[[permission]]
+identifier = "deny-carpetas-os-estado"
+description = "Denies the carpetas_os_estado command without any pre-configured scope."
+commands.deny = ["carpetas_os_estado"]

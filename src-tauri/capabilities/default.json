@@ -28,6 +28,7 @@
     "allow-ia-ruido",
     "allow-resolve-lista",
     "allow-resolve-lista-agregar",
-    "allow-resolve-lista-renombrar"
+    "allow-resolve-lista-renombrar",
+    "allow-carpetas-os-estado"
   ]
 }

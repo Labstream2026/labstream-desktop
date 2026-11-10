@@ -41,6 +41,7 @@ mod memoria;
 mod ia;
 mod resolve_lista;
 mod carpeta;
+mod carpetas_os;
 
 use std::{
     collections::HashMap,
@@ -1844,7 +1845,7 @@ pub fn run() {
         // builder para que TODAS las webviews de pestaña puedan usarlo.
         .register_asynchronous_uri_scheme_protocol("lsthumb", responder_lsthumb)
         // La IA del equipo (src/ia): la máscara de sujeto con la tarjeta NVIDIA, para la página.
-        .invoke_handler(tauri::generate_handler![ia::ia_estado, ia::ia_preparar, ia::ia_sujeto, ia::ia_generar, ia::ia_mantener, ia::ia_ruido, resolve_lista::resolve_lista, resolve_lista::resolve_lista_agregar, resolve_lista::resolve_lista_renombrar]);
+        .invoke_handler(tauri::generate_handler![ia::ia_estado, ia::ia_preparar, ia::ia_sujeto, ia::ia_generar, ia::ia_mantener, ia::ia_ruido, resolve_lista::resolve_lista, resolve_lista::resolve_lista_agregar, resolve_lista::resolve_lista_renombrar, carpetas_os::carpetas_os_estado]);
 
     let app = builder
         .manage(ShellState::default())
@@ -2361,6 +2362,9 @@ pub fn run() {
 
             // El sensor del rastreador: listener de vinculación + hilo de medición.
             tracker::iniciar(app.handle());
+
+            // Los colores de las carpetas del OS en el Explorador (Windows), solos y sin ventanas.
+            carpetas_os::iniciar(app.handle());
 
             // Salud: medición de recursos cada minuto y vigilante del hilo principal.
             salud::iniciar(app.handle(), recursos, dormir_ocultas_ya);
