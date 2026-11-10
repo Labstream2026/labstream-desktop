@@ -69,6 +69,19 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   17-oct-2026 frente a RawNIND, SCUNet y su mezcla con RAW reales a ISO 6400–10000. Prueba en la
   tarjeta: `LS_IA_DIR=<carpeta con las DLL y el modelo> cargo test --release --lib
   ruido_en_la_tarjeta -- --ignored --nocapture`.
+- **Los colores de las carpetas del OS, solos** (v1.36.1, Windows): las carpetas que el OS asigna a
+  un cliente se ven en el Explorador del color del cliente con «OS». Windows solo lo hace si el NAS
+  cuenta como red local y el icono está en el propio computador; antes era un comando que cada
+  persona pegaba en Windows + R. Ahora la app lo deja puesto al abrir (`src-tauri/src/carpetas_os.rs`),
+  sin ventanas y **sin administrador**: le pide a Windows que las IP de los NAS sean «Intranet local»
+  para el usuario (`IInternetSecurityManager::SetZoneMapping`, solo carpetas compartidas, y el
+  Explorador abierto lo ve en el momento) y baja el juego de iconos del OS a
+  `%ProgramData%\Labstream\carpetas-os`. Lo comprueba preguntándole a Windows en qué zona quedó cada
+  IP; si una directiva del equipo no lo deja, lo anota en el diario de salud y el Inicio enseña el
+  aviso con el comando. No escribir esas claves a mano en el registro: Windows deja de leer la lista
+  en la primera clave con un nombre de 20 letras o más (así falló la 1.36.0). Prueba de punta a punta
+  en un Windows de verdad, con una IP de documentación:
+  `PD=<carpeta de prueba> cargo test --lib carpetas_os -- --ignored --nocapture`.
 - **Las bibliotecas de Resolve nuevas llegan solas** (v1.30.0, Windows y Mac): la página del
   OS mira cada 15 min la lista de bibliotecas de Resolve del equipo (`dblist.conf`, en
   `%APPDATA%\Blackmagic Design\DaVinci Resolve\Preferences` o en

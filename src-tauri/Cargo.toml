@@ -1,6 +1,6 @@
 [package]
 name = "labstream-desktop"
-version = "1.36.0"
+version = "1.36.1"
 description = "Cliente de escritorio de Labstream OS"
 authors = ["Labstream SAS"]
 edition = "2021"
@@ -97,4 +97,9 @@ windows = { version = "0.61", features = [
     "Win32_Graphics_Dxgi",
     # y cargar DirectML.dll por su ruta antes que ONNX Runtime (src/ia/motor.rs)
     "Win32_System_LibraryLoader",
+    # Carpetas del OS (1.36.1): las zonas de seguridad por la vía oficial (IInternetSecurityManager).
+    "Win32_System_Com_Urlmon",
 ] }
+# Carpetas del OS (1.36.1): quitar del registro las claves de zona viejas de nombre largo. Ya venía
+# en el árbol de dependencias (la usa el empaquetado), así que no añade nada que bajar.
+winreg = "0.55"

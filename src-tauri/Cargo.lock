@@ -2367,7 +2367,7 @@ dependencies = [
 
 [[package]]
 name = "labstream-desktop"
-version = "1.36.0"
+version = "1.36.1"
 dependencies = [
  "active-win-pos-rs",
  "base64 0.22.1",
@@ -2390,6 +2390,7 @@ dependencies = [
  "ureq",
  "webview2-com",
  "windows 0.61.3",
+ "winreg 0.55.0",
  "zip",
 ]
 
