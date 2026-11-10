@@ -42,6 +42,7 @@ mod ia;
 mod resolve_lista;
 mod carpeta;
 mod carpetas_os;
+mod actualizar;
 
 use std::{
     collections::HashMap,
@@ -1617,13 +1618,13 @@ async fn check_update_manual(handle: tauri::AppHandle) {
     };
     match updater.check().await {
         Ok(Some(update)) => {
-            notify(format!("Instalando la versión {}…", update.version));
-            let version = update.version.clone();
-            match update.download_and_install(|_, _| {}, move || salud::antes_de_actualizar(&version)).await {
+            notify(format!("Instalando la versión {}. La app se vuelve a abrir sola.", update.version));
+            // En Windows, si el instalador arranca, la app se cierra dentro de `instalar` (actualizar.rs).
+            match actualizar::instalar(update).await {
                 Ok(()) => handle.restart(),
                 Err(e) => {
-                    salud::anotar("ERROR", "actualizacion", &format!("no se pudo instalar: {e}"));
-                    notify("No se pudo instalar la actualización. Intenta de nuevo más tarde.".into());
+                    salud::anotar("ERROR", "actualizacion", &e);
+                    notify(format!("{}. La app sigue abierta en la versión {}.", primera_mayuscula(&e), handle.package_info().version));
                 }
             }
         }
@@ -1706,9 +1707,19 @@ async fn buscar_sin_instalar(handle: tauri::AppHandle) {
 }
 
 // Busca e instala una actualización en segundo plano. Si instala, avisa y reinicia.
+// Desde la 1.36.2 (actualizar.rs): la app solo se cierra si Windows dejó arrancar el instalador, una
+// versión que ya falló en este computador no se instala sola al abrir (se ofrece en la barra), y antes
+// de cerrarse lo dice. `no_termino`: la versión que la vez anterior no terminó de instalarse.
 #[cfg(desktop)]
-async fn check_update(handle: tauri::AppHandle) {
+async fn check_update(handle: tauri::AppHandle, no_termino: Option<String>) {
     use tauri_plugin_updater::UpdaterExt;
+    let actual = handle.package_info().version.to_string();
+    let notify = |body: String| {
+        let _ = handle.notification().builder().title("Labstream OS").body(body).show();
+    };
+    if let Some(v) = &no_termino {
+        notify(format!("La versión {v} no se terminó de instalar y la app sigue en la {actual}. Pulsa «Actualizar» en la barra para intentarlo otra vez."));
+    }
     let updater = match handle.updater() {
         Ok(u) => u,
         Err(_) => return,
@@ -1721,22 +1732,35 @@ async fn check_update(handle: tauri::AppHandle) {
             return;
         }
     };
-    {
-        let version = update.version.clone();
-        let r = update.download_and_install(|_, _| {}, move || salud::antes_de_actualizar(&version)).await;
-        if let Err(e) = &r {
-            salud::anotar("ERROR", "actualizacion", &format!("no se pudo instalar: {e}"));
+    let version = update.version.clone();
+    let ofrecer_en_la_barra = |handle: &tauri::AppHandle| {
+        if let Ok(mut p) = PENDIENTE.lock() {
+            p.replace(version.clone());
         }
-        if r.is_ok() {
-            let _ = handle
-                .notification()
-                .builder()
-                .title("Labstream OS")
-                .body("Se instaló una actualización. La app se reiniciará.")
-                .show();
+        broadcast(handle);
+    };
+    if !actualizar::puede_instalar_sola(&version) {
+        salud::anotar("INFO", "actualizacion", &format!("la versión {version} ya falló en este equipo: no se instala sola, la barra ofrece «Actualizar»"));
+        ofrecer_en_la_barra(&handle);
+        return;
+    }
+    notify(format!("Actualizando Labstream OS a la versión {version}. Se vuelve a abrir sola en unos segundos."));
+    match actualizar::instalar(update).await {
+        Ok(()) => {
+            notify("Se instaló una actualización. La app se reiniciará.".into());
             handle.restart();
         }
+        Err(e) => {
+            salud::anotar("ERROR", "actualizacion", &e);
+            ofrecer_en_la_barra(&handle);
+            notify(format!("{}. La app sigue abierta en la versión {actual}.", primera_mayuscula(&e)));
+        }
     }
+}
+
+fn primera_mayuscula(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|p| p.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
 }
 
 // Extrae un campo string del payload JSON de un evento.
@@ -1854,6 +1878,8 @@ pub fn run() {
             let handle = app.handle().clone();
             // Lo primero: el diario de salud (pánicos, cierres de golpe, reinicio automático).
             salud::preparar(&handle);
+            // ¿Quedó a medias la instalación de una versión? (actualizar.rs)
+            let no_termino = actualizar::preparar(&handle);
             let saved = load_persisted(&handle);
 
             // Arranque automático al iniciar sesión: por defecto activado, pero se respeta
@@ -1871,7 +1897,7 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 let handle = app.handle().clone();
-                tauri::async_runtime::spawn(check_update(handle));
+                tauri::async_runtime::spawn(check_update(handle, no_termino));
             }
             // Y después, cada hora, sin instalarla: la barra ofrece «Actualizar» (ver PENDIENTE).
             #[cfg(desktop)]
