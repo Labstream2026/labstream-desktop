@@ -1,5 +1,5 @@
 # Mide cuánto tarda el Explorador en sacar los iconos de una carpeta del NAS (11-nov-2026).
-# Uso (PowerShell, sin administrador):
+# Uso (PowerShell COMO ADMINISTRADOR: Windows no deja tocar las directivas sin serlo):
 #   powershell -ExecutionPolicy Bypass -File medir-carpetas-os.ps1 "\\192.168.0.22\LABSTREAM"
 # Hace 3 pasadas con la caché de desktop.ini APAGADA y 3 ENCENDIDA (reinicia el Explorador entre
 # medio para que lea la directiva) y deja la caché encendida al terminar.
@@ -19,9 +19,11 @@ public static class Sh {
 }
 "@
 
-$clave = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer'
+$clave = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer'
 
 function Pasada {
+  # En frío: Windows guarda la lista de una carpeta de red 10 s; se espera a que caduque.
+  Start-Sleep 15
   $sw = [Diagnostics.Stopwatch]::StartNew()
   $carpetas = Get-ChildItem -LiteralPath $Ruta -Directory -Force -ErrorAction SilentlyContinue
   $pintadas = 0
@@ -37,12 +39,14 @@ function Explorador {
   Start-Sleep 3
 }
 
+$ErrorActionPreference = 'Stop'
 New-Item -Path $clave -Force | Out-Null
+$ErrorActionPreference = 'Continue'
 foreach ($valor in 0, 1) {
   Set-ItemProperty -Path $clave -Name UseDesktopIniCache -Value $valor -Type DWord
   Explorador
   1..3 | ForEach-Object {
     $r = Pasada
-    "{0}  pasada {1}: {2} ms  ({3} carpetas, {4} con icono del OS)" -f ($(if ($valor) { 'CON caché' } else { 'SIN caché' })), $_, $r.ms, $r.carpetas, $r.pintadas
+    "{0}  pasada {1}: {2} ms  ({3} carpetas, {4} con icono del OS)" -f ($(if ($valor) { 'CON cache' } else { 'SIN cache' })), $_, $r.ms, $r.carpetas, $r.pintadas
   }
 }
