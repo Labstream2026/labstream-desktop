@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resolve-diagnostico"
+description = "Enables the resolve_diagnostico command without any pre-configured scope."
+commands.allow = ["resolve_diagnostico"]
+
+[[permission]]
+identifier = "deny-resolve-diagnostico"
+description = "Denies the resolve_diagnostico command without any pre-configured scope."
+commands.deny = ["resolve_diagnostico"]

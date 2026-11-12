@@ -32,6 +32,7 @@
     "allow-resolve-lista-red",
     "allow-resolve-modo",
     "allow-resolve-modo-poner",
+    "allow-resolve-diagnostico",
     "allow-carpetas-os-estado"
   ]
 }

@@ -90,6 +90,18 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   vuelta olvida solo las vistas de **carpetas de red** que ya estaban como vídeo, fotos o música
   (`src-tauri/src/vistas_red.rs`). Cuenta del todo desde el siguiente inicio de sesión; la app no
   reinicia el Explorador. Prueba contra una copia del registro: `scripts/probar-vistas-red.ps1`.
+- **La lista de Resolve en Mac, donde está de verdad, y un diagnóstico** (v1.40.2): en Mac la app
+  buscaba `dblist.conf` en `~/Library/Application Support/…/Preferences`, pero las preferencias de
+  Resolve viven en `~/Library/Preferences/Blackmagic Design/DaVinci Resolve`. Resultado: en los Mac
+  decía «Resolve no tiene bibliotecas de red en este equipo» y ni llegaban las bibliotecas nuevas ni
+  cambiaba de red (el Mac de Munka, 12-nov-2026). Ahora mira los sitios conocidos por orden
+  (`donde_buscar`) y, si no está en ninguno, la busca bajo las carpetas de Blackmagic sin entrar en
+  los proyectos (`buscar_lista`); se queda con la que tiene bibliotecas de red. `resolve_diagnostico`
+  dice en frases lo que la app ve en ese equipo (dónde está la lista, cuántas bibliotecas por cada
+  dirección, si Resolve está abierto y si el servidor responde por la oficina y por ZeroTier, y por
+  qué no), sin ninguna clave: lo enseña el botón «Diagnóstico de este equipo» de la pestaña Resolve.
+  `Info.plist` lleva `NSLocalNetworkUsageDescription`: macOS 15 o más nuevo pide permiso de «Red
+  local» para esa comprobación, y sin el texto el aviso salía sin explicar para qué.
 - **Resolve en este equipo: Automático, Local, ZeroTier o Apagado** (v1.40.0, Windows y Mac): el
   menú ⋮ tiene «Resolve en este equipo» y la pestaña Resolve del OS el mismo selector
   (`resolve_modo` / `resolve_modo_poner`, guardado en `resolve-modo.json` de la configuración de la

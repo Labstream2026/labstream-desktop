@@ -170,18 +170,102 @@ pub(crate) fn cambiar_nombres(actual: &str, renombres: &[Renombre]) -> (String, 
 
 // ── Dónde está la lista y si Resolve está abierto ────────────────────────────────────────────
 
-fn ruta_lista() -> Option<PathBuf> {
+/// Dónde puede estar dblist.conf en este sistema: los sitios fijos, por orden de preferencia, y las
+/// carpetas de Blackmagic donde buscarlo si no está en ninguno.
+///
+/// En Windows está con las preferencias de Resolve (%APPDATA%\…\Preferences). En Mac las preferencias
+/// de Resolve viven en ~/Library/Preferences/Blackmagic Design/DaVinci Resolve, NO en Application
+/// Support: hasta la 1.40.1 solo se miraba Application Support/…/Preferences, y en los Mac la app decía
+/// «Resolve no tiene bibliotecas de red en este equipo» aunque las tuviera (12-nov-2026, el Mac de
+/// Munka: ni le llegaban las bibliotecas nuevas ni cambiaba de red). Por si otra versión de Resolve lo
+/// guarda en otro sitio, si no está en los fijos se busca bajo las carpetas de Blackmagic.
+fn donde_buscar() -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
     #[cfg(windows)]
     {
-        std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Blackmagic Design").join("DaVinci Resolve").join("Preferences").join("dblist.conf"))
+        let a = PathBuf::from(std::env::var_os("APPDATA")?);
+        Some((vec![a.join("Blackmagic Design").join("DaVinci Resolve").join("Preferences").join("dblist.conf")], vec![]))
     }
     #[cfg(target_os = "macos")]
     {
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/Blackmagic Design/DaVinci Resolve/Preferences/dblist.conf"))
+        let h = PathBuf::from(std::env::var_os("HOME")?);
+        Some((
+            vec![
+                h.join("Library/Preferences/Blackmagic Design/DaVinci Resolve/dblist.conf"),
+                h.join("Library/Application Support/Blackmagic Design/DaVinci Resolve/Preferences/dblist.conf"),
+                h.join("Library/Application Support/Blackmagic Design/DaVinci Resolve/dblist.conf"),
+            ],
+            vec![
+                h.join("Library/Preferences/Blackmagic Design"),
+                h.join("Library/Application Support/Blackmagic Design"),
+                PathBuf::from("/Library/Application Support/Blackmagic Design"),
+                // El Resolve de la App Store guarda lo suyo dentro de su contenedor.
+                h.join("Library/Containers/com.blackmagic-design.DaVinciResolveAppStore/Data/Library"),
+                h.join("Library/Containers/com.blackmagic-design.DaVinciResolveLite/Data/Library"),
+            ],
+        ))
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         None
+    }
+}
+
+const FONDO_DE_BUSQUEDA: usize = 5;
+const TOPE_DE_CARPETAS: usize = 4000;
+/// Árboles grandes de Resolve donde la lista no está: no se entra (proyectos, LUT, Fusion, registros).
+const NO_ENTRAR: [&str; 6] = ["Resolve Project Library", "Resolve Disk Database", "Fusion", "LUT", "logs", "CacheClip"];
+
+/// Los dblist.conf que hay bajo `raiz`, sin bajar más de `fondo` carpetas ni seguir enlaces.
+pub(crate) fn buscar_lista(raiz: &Path, fondo: usize) -> Vec<PathBuf> {
+    let mut hallados = Vec::new();
+    let mut pila = vec![(raiz.to_path_buf(), 0usize)];
+    let mut vistas = 0usize;
+    while let Some((dir, nivel)) = pila.pop() {
+        vistas += 1;
+        if vistas > TOPE_DE_CARPETAS {
+            break;
+        }
+        let Ok(entradas) = std::fs::read_dir(&dir) else { continue };
+        for e in entradas.flatten() {
+            let Ok(tipo) = e.file_type() else { continue };
+            let nombre = e.file_name();
+            if tipo.is_file() && nombre == "dblist.conf" {
+                hallados.push(e.path());
+            } else if tipo.is_dir() && nivel < fondo && !NO_ENTRAR.iter().any(|n| nombre == *n) {
+                pila.push((e.path(), nivel + 1));
+            }
+        }
+    }
+    hallados.sort();
+    hallados
+}
+
+/// De las candidatas, la primera que tiene bibliotecas de red; si ninguna las tiene, la primera que existe.
+pub(crate) fn elegir_lista(candidatas: &[PathBuf]) -> Option<PathBuf> {
+    let existen: Vec<&PathBuf> = candidatas.iter().filter(|p| p.is_file()).collect();
+    existen
+        .iter()
+        .find(|p| std::fs::read_to_string(p).is_ok_and(|t| t.lines().any(|l| leer_linea(l).is_some())))
+        .or(existen.first())
+        .map(|p| (*p).clone())
+}
+
+/// La lista de este equipo. Si no existe en ningún sitio, el sitio principal (para decir «no está»).
+fn ruta_lista() -> Option<PathBuf> {
+    let (fijas, raices) = donde_buscar()?;
+    if let Some(p) = elegir_lista(&fijas) {
+        return Some(p);
+    }
+    let halladas: Vec<PathBuf> = raices.iter().flat_map(|r| buscar_lista(r, FONDO_DE_BUSQUEDA)).collect();
+    elegir_lista(&halladas).or_else(|| fijas.into_iter().next())
+}
+
+/// Una ruta para leerla: la carpeta de la persona se dice «~».
+fn legible(p: &Path) -> String {
+    let casa = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    match casa.as_deref().and_then(|c| p.strip_prefix(c).ok()) {
+        Some(resto) => format!("~{}{}", std::path::MAIN_SEPARATOR, resto.display()),
+        None => p.display().to_string(),
     }
 }
 
@@ -351,6 +435,19 @@ pub struct Estado {
     vistas: Vec<String>,
 }
 
+const SIN_BIBLIOTECAS: &str = "Resolve no tiene bibliotecas de red en este equipo.";
+
+/// «No tiene bibliotecas» con lo que se miró: en un Mac, si al menos están las preferencias de Resolve
+/// (está instalado y se ha abierto) o ni eso. Se lee en la lista de equipos de la pestaña Resolve.
+fn sin_bibliotecas_con_detalle() -> String {
+    let Some((fijas, _)) = donde_buscar() else { return SIN_BIBLIOTECAS.into() };
+    let carpeta = fijas.first().and_then(|p| p.parent()).is_some_and(|d| d.is_dir());
+    format!(
+        "Resolve no tiene bibliotecas de red en este equipo: no encontré su lista (dblist.conf). {}",
+        if carpeta { "Las preferencias de Resolve sí están: añade una biblioteca de red a mano una vez y las demás llegan solas." } else { "Tampoco están las preferencias de Resolve: o no está instalado o no se ha abierto nunca con esta cuenta." }
+    )
+}
+
 fn sin_lista(motivo: &str) -> Estado {
     Estado { disponible: false, motivo: Some(motivo.into()), abierto: false, cuentas: vec![], nombres: vec![], vistas: vec![] }
 }
@@ -359,7 +456,7 @@ fn mirar(ruta: Option<PathBuf>, vistas_en: Option<&Path>, abierto: fn() -> bool)
     let Some(ruta) = ruta else { return sin_lista("Este sistema no tiene la lista de Resolve.") };
     let texto = match std::fs::read_to_string(&ruta) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return sin_lista("Resolve no tiene bibliotecas de red en este equipo."),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return sin_lista(SIN_BIBLIOTECAS),
         Err(e) => return sin_lista(&format!("No pude leer la lista de Resolve: {e}")),
     };
     let lineas: Vec<Linea> = texto.lines().filter_map(leer_linea).collect();
@@ -385,7 +482,11 @@ pub async fn resolve_lista<R: Runtime>(app: AppHandle<R>) -> Estado {
     let vistas = ruta_vistas(&app);
     tauri::async_runtime::spawn_blocking(move || {
         let _g = CANDADO.lock().unwrap_or_else(|e| e.into_inner());
-        mirar(ruta_lista(), vistas.as_deref(), resolve_abierto)
+        let mut e = mirar(ruta_lista(), vistas.as_deref(), resolve_abierto);
+        if !e.disponible && e.motivo.as_deref() == Some(SIN_BIBLIOTECAS) {
+            e.motivo = Some(sin_bibliotecas_con_detalle());
+        }
+        e
     })
     .await
     .unwrap_or_else(|_| sin_lista("No pude mirar la lista de Resolve."))
@@ -613,24 +714,93 @@ pub(crate) fn cambiar_direccion(actual: &str, de: &str, a: &str) -> (String, Vec
 
 /// ¿Hay un PostgreSQL en esa dirección? Se le hace la pregunta con la que empieza cualquier conexión
 /// (SSLRequest) y tiene que contestar «S» o «N»: que el puerto esté abierto no basta (en casa, esa
-/// misma dirección puede ser otro aparato). No manda usuario ni clave.
-fn hay_postgres(ip: &str, espera: std::time::Duration) -> bool {
-    use std::io::Read;
+/// misma dirección puede ser otro aparato). No manda usuario ni clave. Si no, dice por qué.
+fn probar_postgres(ip: &str, espera: std::time::Duration) -> Result<(), String> {
+    use std::io::{ErrorKind, Read};
     use std::net::{IpAddr, SocketAddr, TcpStream};
-    let Ok(ip) = ip.parse::<IpAddr>() else { return false };
-    let Ok(mut s) = TcpStream::connect_timeout(&SocketAddr::new(ip, PUERTO_POSTGRES), espera) else { return false };
+    let por_que = |e: std::io::Error| match e.kind() {
+        ErrorKind::TimedOut | ErrorKind::WouldBlock => "no contesta a tiempo".to_string(),
+        ErrorKind::ConnectionRefused => "rechaza la conexión".to_string(),
+        // En macOS 15 o más nuevo, sin el permiso de «Red local» las conexiones a la red propia (y a
+        // ZeroTier, que es otra red propia) fallan así, al instante.
+        ErrorKind::HostUnreachable | ErrorKind::NetworkUnreachable if cfg!(target_os = "macos") => {
+            "sin camino hasta ella; si la red está conectada, falta el permiso: Ajustes del Sistema › Privacidad y seguridad › Red local › Labstream OS".to_string()
+        }
+        ErrorKind::HostUnreachable | ErrorKind::NetworkUnreachable => "sin camino hasta ella".to_string(),
+        _ => e.to_string(),
+    };
+    let ip: IpAddr = ip.parse().map_err(|_| "dirección mal escrita".to_string())?;
+    let mut s = TcpStream::connect_timeout(&SocketAddr::new(ip, PUERTO_POSTGRES), espera).map_err(por_que)?;
     let _ = s.set_read_timeout(Some(espera));
     let _ = s.set_write_timeout(Some(espera));
-    if s.write_all(&[0, 0, 0, 8, 4, 210, 22, 47]).is_err() {
-        return false;
-    }
+    s.write_all(&[0, 0, 0, 8, 4, 210, 22, 47]).map_err(por_que)?;
     let mut r = [0u8; 1];
-    s.read_exact(&mut r).is_ok() && matches!(r[0], b'S' | b'N')
+    s.read_exact(&mut r).map_err(por_que)?;
+    if matches!(r[0], b'S' | b'N') {
+        Ok(())
+    } else {
+        Err("contesta algo que no es PostgreSQL".into())
+    }
+}
+
+fn espera_de(ip: &str) -> std::time::Duration {
+    // En la oficina contesta en milisegundos; por ZeroTier, con el túnel recién levantado, tarda más.
+    std::time::Duration::from_millis(if ip == SERVIDOR.0 { 1500 } else { 4000 })
 }
 
 fn llega(ip: &str) -> bool {
-    // En la oficina contesta en milisegundos; por ZeroTier, con el túnel recién levantado, tarda más.
-    hay_postgres(ip, std::time::Duration::from_millis(if ip == SERVIDOR.0 { 1500 } else { 4000 }))
+    probar_postgres(ip, espera_de(ip)).is_ok()
+}
+
+// ── El diagnóstico (1.40.2, 12-nov-2026) ─────────────────────────────────────────────────────
+//
+// «No me cargan las bibliotecas en mi Mac»: desde fuera no se veía por qué. Esto lo dice en frases,
+// para leerlo o copiarlo desde la pestaña Resolve del OS: dónde está la lista, cuántas bibliotecas
+// entran por cada dirección, si Resolve está abierto y si el servidor contesta por la oficina y por
+// ZeroTier (y si no, por qué). Nunca una línea de la lista: llevan la clave.
+
+fn diagnostico(modo: Modo, version: &str, abierto: fn() -> bool, probar: &dyn Fn(&str) -> Result<(), String>) -> Vec<String> {
+    let sistema = if cfg!(windows) { "Windows" } else if cfg!(target_os = "macos") { "Mac" } else { "otro sistema" };
+    let mut d = vec![format!("App {version} · {sistema} · modo: {}", modo.etiqueta())];
+    let Some((fijas, _)) = donde_buscar() else {
+        d.push("En este sistema la app no sabe dónde guarda Resolve su lista.".into());
+        return d;
+    };
+    match ruta_lista().filter(|p| p.is_file()) {
+        Some(p) => {
+            d.push(format!("Lista de Resolve: {}", legible(&p)));
+            match std::fs::read_to_string(&p) {
+                Ok(texto) => {
+                    let lineas: Vec<Linea> = texto.lines().filter_map(leer_linea).collect();
+                    let de = |ip: &str| lineas.iter().filter(|l| l.ip == ip).count();
+                    let (of, zt) = (de(SERVIDOR.0), de(SERVIDOR.1));
+                    d.push(format!("Bibliotecas de red: {} ({of} por la oficina, {zt} por ZeroTier, {} de otra dirección)", lineas.len(), lineas.len() - of - zt));
+                }
+                Err(e) => d.push(format!("No pude leerla: {e}")),
+            }
+        }
+        None => {
+            d.push("Lista de Resolve: no la encontré (dblist.conf). Busqué en:".into());
+            d.extend(fijas.iter().map(|f| format!("  {}", legible(f))));
+        }
+    }
+    d.push(format!("Resolve: {}", if abierto() { "abierto (la lista solo se cambia con Resolve cerrado)" } else { "cerrado" }));
+    for (nombre, ip) in [("Oficina", SERVIDOR.0), ("ZeroTier", SERVIDOR.1)] {
+        d.push(match probar(ip) {
+            Ok(()) => format!("{nombre} ({ip}): el servidor responde"),
+            Err(e) => format!("{nombre} ({ip}): no responde ({e})"),
+        });
+    }
+    d
+}
+
+#[tauri::command]
+pub async fn resolve_diagnostico<R: Runtime>(app: AppHandle<R>) -> Vec<String> {
+    let m = modo(&app);
+    let version = app.package_info().version.to_string();
+    tauri::async_runtime::spawn_blocking(move || diagnostico(m, &version, resolve_abierto, &|ip| probar_postgres(ip, espera_de(ip))))
+        .await
+        .unwrap_or_else(|_| vec!["No pude hacer el diagnóstico.".into()])
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -729,7 +899,10 @@ pub(crate) fn frase_de_modo(r: &RedLista) -> String {
         return if total == 0 {
             "Listo. Este equipo todavía no tiene bibliotecas del servidor en Resolve: las nuevas entrarán así.".into()
         } else {
-            "Automático: ahora este equipo no llega al servidor ni por la oficina ni por ZeroTier. No cambié nada.".into()
+            format!(
+                "Automático: ahora este equipo no llega al servidor ni por la oficina ni por ZeroTier. No cambié nada.{}",
+                if cfg!(target_os = "macos") { " Si ZeroTier está conectado, revisa Ajustes del Sistema › Privacidad y seguridad › Red local › Labstream OS." } else { "" }
+            )
         };
     };
     let donde = if red == Red::Oficina { "la red de la oficina" } else { "ZeroTier" };
@@ -955,6 +1128,59 @@ mod pruebas {
         assert!(agregar(Some(lista.clone()), Some(&vistas), ajeno, cerrado).is_err());
         assert_eq!(std::fs::read_to_string(&lista).unwrap(), LISTA);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ── Dónde está la lista (1.40.2) ──
+
+    #[test]
+    fn encuentra_la_lista_donde_resolve_la_tenga_y_prefiere_la_que_tiene_bibliotecas() {
+        let d = carpeta("donde");
+        let prefs = d.join("Library/Preferences/Blackmagic Design/DaVinci Resolve");
+        let soporte = d.join("Library/Application Support/Blackmagic Design/DaVinci Resolve/Preferences");
+        std::fs::create_dir_all(&prefs).unwrap();
+        std::fs::create_dir_all(&soporte).unwrap();
+        let fijas = vec![prefs.join("dblist.conf"), soporte.join("dblist.conf")];
+
+        // Ninguna existe.
+        assert_eq!(elegir_lista(&fijas), None);
+        // Solo la del sitio viejo, y sin bibliotecas de red: es la que hay.
+        std::fs::write(&fijas[1], "Local Database:C/x:y:z:w:DISK\n").unwrap();
+        assert_eq!(elegir_lista(&fijas), Some(fijas[1].clone()));
+        // La de las preferencias tiene bibliotecas de red: gana aunque la otra también exista.
+        std::fs::write(&fijas[0], format!("A{OF}:{OF}:camilo:k1:A:QPSQL\n")).unwrap();
+        assert_eq!(elegir_lista(&fijas), Some(fijas[0].clone()));
+        // Y al revés: gana la que tiene bibliotecas, no la primera.
+        std::fs::write(&fijas[0], "Local Database:C/x:y:z:w:DISK\n").unwrap();
+        std::fs::write(&fijas[1], format!("A{OF}:{OF}:camilo:k1:A:QPSQL\n")).unwrap();
+        assert_eq!(elegir_lista(&fijas), Some(fijas[1].clone()));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn busca_la_lista_bajo_las_carpetas_de_blackmagic_sin_entrar_en_los_proyectos() {
+        let d = carpeta("buscar");
+        let rara = d.join("DaVinci Resolve/Otra/Sitio");
+        let proyectos = d.join("DaVinci Resolve/Resolve Project Library/Resolve Projects");
+        let honda = d.join("a/b/c/d/e/f/g");
+        for c in [&rara, &proyectos, &honda] {
+            std::fs::create_dir_all(c).unwrap();
+            std::fs::write(c.join("dblist.conf"), "x").unwrap();
+        }
+        assert_eq!(buscar_lista(&d, FONDO_DE_BUSQUEDA), vec![rara.join("dblist.conf")]);
+        assert_eq!(buscar_lista(&d.join("no-existe"), FONDO_DE_BUSQUEDA), Vec::<PathBuf>::new());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn el_diagnostico_dice_el_modo_resolve_y_por_que_no_responde_sin_ninguna_clave() {
+        let solo_zt = |ip: &str| if ip == ZT { Ok(()) } else { Err("no contesta a tiempo".to_string()) };
+        let d = diagnostico(Modo::Zerotier, "1.40.2", abierto, &solo_zt);
+        assert!(d[0].starts_with("App 1.40.2 · "));
+        assert!(d[0].ends_with("modo: ZeroTier (desde fuera)"));
+        assert!(d.iter().any(|l| l.starts_with("Resolve: abierto")));
+        assert!(d.contains(&format!("Oficina ({OF}): no responde (no contesta a tiempo)")));
+        assert!(d.contains(&format!("ZeroTier ({ZT}): el servidor responde")));
+        assert!(d.iter().all(|l| !l.contains("QPSQL")));
     }
 
     // ── La oficina o ZeroTier ──
