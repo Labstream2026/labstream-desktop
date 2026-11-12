@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resolve-modo-poner"
+description = "Enables the resolve_modo_poner command without any pre-configured scope."
+commands.allow = ["resolve_modo_poner"]
+
+[[permission]]
+identifier = "deny-resolve-modo-poner"
+description = "Denies the resolve_modo_poner command without any pre-configured scope."
+commands.deny = ["resolve_modo_poner"]

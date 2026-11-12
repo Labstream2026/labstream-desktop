@@ -90,6 +90,15 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   vuelta olvida solo las vistas de **carpetas de red** que ya estaban como vídeo, fotos o música
   (`src-tauri/src/vistas_red.rs`). Cuenta del todo desde el siguiente inicio de sesión; la app no
   reinicia el Explorador. Prueba contra una copia del registro: `scripts/probar-vistas-red.ps1`.
+- **Resolve en este equipo: Automático, Local, ZeroTier o Apagado** (v1.40.0, Windows y Mac): el
+  menú ⋮ tiene «Resolve en este equipo» y la pestaña Resolve del OS el mismo selector
+  (`resolve_modo` / `resolve_modo_poner`, guardado en `resolve-modo.json` de la configuración de la
+  app; avisa a las pestañas con el evento `ls-resolve-modo`). Automático es lo de la 1.39; Local y
+  ZeroTier fijan la dirección aunque la otra responda; Apagado (equipos sin Resolve): ni se mira ni
+  se toca la lista, ni la red. Elegir desde el menú lo aplica en el momento y lo dice con un aviso.
+- **La fecha de hoy en la barra de pestañas** (v1.40.0): «Jueves, 12 de noviembre», en hora de
+  Bogotá, a la derecha (antes estaba en la barra superior de cada página del OS). Con la ventana
+  estrecha se esconde: las pestañas mandan.
 - **Resolve entra por la oficina o por ZeroTier, según dónde esté el equipo** (v1.39.0, Windows y
   Mac): `resolve_lista_red` mira por dónde llega el equipo al servidor de las bibliotecas (le hace a
   PostgreSQL la pregunta con la que empieza cualquier conexión, sin usuario ni clave) y deja las

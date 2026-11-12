@@ -347,6 +347,21 @@
         border-radius: 13px;
       }
       #version:hover { color: var(--accent); }
+      /* La fecha de hoy (1.40, 12-nov-2026). Munka: «quita la fecha de acá y colócala arriba en la
+         barra de la app, tanto en Windows como en Mac». Estaba en la barra superior de cada página
+         del OS, donde peleaba por el sitio con las pestañas del NAS. Es parte del hueco libre: con
+         ella también se arrastra la ventana. Con la ventana estrecha, las pestañas mandan. */
+      #fecha {
+        flex: 0 0 auto;
+        padding: 0 8px 0 4px;
+        color: var(--muted);
+        font-size: 11.5px;
+        font-weight: 500;
+        white-space: nowrap;
+        cursor: default;
+        user-select: none;
+      }
+      @media (max-width: 1180px) { #fecha { display: none; } }
       /* Hay una versión nueva publicada: el botón la ofrece (clic: instala y reinicia). */
       #version.nueva {
         color: #fff;
@@ -414,6 +429,7 @@
         <button id="z-pct" title="Restablecer zoom (⌘/Ctrl+0)">100%</button>
         <button id="z-mas" title="Acercar (⌘/Ctrl++)">+</button>
       </div>
+      <span id="fecha" data-tauri-drag-region></span>
       <button id="version" title="Versión de la app · clic: buscar actualización"></button>
       <button class="icono" id="menu" title="Opciones de la app">⋮</button>
       <!-- Solo visibles en Windows (clase `win` del body): allí no hay barra de título. -->
@@ -436,6 +452,18 @@
       const $pct = document.getElementById("z-pct");
       const $ver = document.getElementById("version");
       const $wmax = document.getElementById("w-max");
+
+      // «Jueves, 12 de noviembre», en Bogotá aunque el equipo esté en otra zona. Se repasa cada
+      // minuto: con la app abierta de un día para otro, cambia sola a medianoche.
+      const $fecha = document.getElementById("fecha");
+      function pintarFecha() {
+        try {
+          const s = new Intl.DateTimeFormat("es-CO", { timeZone: "America/Bogota", weekday: "long", day: "numeric", month: "long" }).format(new Date());
+          $fecha.textContent = s.charAt(0).toUpperCase() + s.slice(1);
+        } catch (e) {}
+      }
+      pintarFecha();
+      setInterval(pintarFecha, 60000);
 
       // Nombre + icono de cada pestaña a partir de su RUTA (mismas etiquetas que la barra
       // superior de la web). Sin esto todas las pestañas se llamaban «(25) Labstream OS» y

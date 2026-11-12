@@ -1836,7 +1836,15 @@ fn show_app_menu<R: Runtime>(app: &AppHandle<R>) {
     // de paso es la comprobación más simple de que el caché está funcionando (el número crece al
     // navegar fotos y vuelve a 0 al vaciar).
     let vaciar_txt = format!("Vaciar caché de imágenes ({})", tamano_legible(cache::tamano(app)));
+    // «Resolve en este equipo» (1.40): por dónde entran las bibliotecas, o apagado si aquí no hay Resolve.
+    let modo_actual = resolve_lista::modo(app);
     let build = || -> tauri::Result<Menu<R>> {
+        let modos: Vec<CheckMenuItem<R>> = resolve_lista::Modo::TODOS
+            .into_iter()
+            .map(|m| CheckMenuItem::with_id(app, format!("resolve-modo-{}", m.id()), m.etiqueta(), true, m == modo_actual, None::<&str>))
+            .collect::<tauri::Result<_>>()?;
+        let refs: Vec<&dyn tauri::menu::IsMenuItem<R>> = modos.iter().map(|m| m as &dyn tauri::menu::IsMenuItem<R>).collect();
+        let resolve = Submenu::with_items(app, "Resolve en este equipo", true, &refs)?;
         Ok(Menu::with_items(
             app,
             &[
@@ -1854,6 +1862,7 @@ fn show_app_menu<R: Runtime>(app: &AppHandle<R>) {
                 &PredefinedMenuItem::separator(app)?,
                 &MenuItem::with_id(app, "open-browser", "Abrir esta página en el navegador", true, None::<&str>)?,
                 &MenuItem::with_id(app, "clear-cache", &vaciar_txt, true, None::<&str>)?,
+                &resolve,
                 &CheckMenuItem::with_id(app, "autostart-toggle", "Iniciar con el sistema", true, autostart_on, None::<&str>)?,
                 &MenuItem::with_id(app, "check-update", "Buscar actualización…", true, None::<&str>)?,
                 &PredefinedMenuItem::separator(app)?,
@@ -2014,6 +2023,24 @@ fn reorder_tabs<R: Runtime>(app: &AppHandle<R>, order: Vec<String>) {
     }
     broadcast(app);
     save_persisted(app);
+}
+
+// «Resolve en este equipo» del menú ⋮ (1.40): guarda el modo, lo aplica a la lista en segundo plano
+// (mirar la red tarda hasta unos segundos) y lo dice con un aviso nativo.
+fn elegir_modo_resolve<R: Runtime>(app: &AppHandle<R>, id: &str) {
+    let Some(m) = resolve_lista::Modo::de_id(id) else { return };
+    if let Err(e) = resolve_lista::resolve_modo_poner(app.clone(), m) {
+        let _ = app.notification().builder().title("Labstream OS").body(e).show();
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let texto = match resolve_lista::aplicar_modo(&app) {
+            Ok(r) => resolve_lista::frase_de_modo(&r),
+            Err(e) => e,
+        };
+        let _ = app.notification().builder().title("Resolve en este equipo").body(texto).show();
+    });
 }
 
 // Activa/desactiva el arranque con el sistema y RECUERDA la elección (si no, el arranque
@@ -2304,7 +2331,7 @@ pub fn run() {
         // builder para que TODAS las webviews de pestaña puedan usarlo.
         .register_asynchronous_uri_scheme_protocol("lsthumb", responder_lsthumb)
         // La IA del equipo (src/ia): la máscara de sujeto con la tarjeta NVIDIA, para la página.
-        .invoke_handler(tauri::generate_handler![ia::ia_estado, ia::ia_preparar, ia::ia_sujeto, ia::ia_generar, ia::ia_mantener, ia::ia_ruido, resolve_lista::resolve_lista, resolve_lista::resolve_lista_agregar, resolve_lista::resolve_lista_renombrar, resolve_lista::resolve_lista_red, carpetas_os::carpetas_os_estado]);
+        .invoke_handler(tauri::generate_handler![ia::ia_estado, ia::ia_preparar, ia::ia_sujeto, ia::ia_generar, ia::ia_mantener, ia::ia_ruido, resolve_lista::resolve_lista, resolve_lista::resolve_lista_agregar, resolve_lista::resolve_lista_renombrar, resolve_lista::resolve_lista_red, resolve_lista::resolve_modo, resolve_lista::resolve_modo_poner, carpetas_os::carpetas_os_estado]);
 
     let app = builder
         .manage(ShellState::default())
@@ -2490,6 +2517,7 @@ pub fn run() {
                 }
                 id if id.starts_with("tab-color-") => tab_menu_action(app, id),
                 "autostart-toggle" => toggle_autostart(app),
+                id if id.starts_with("resolve-modo-") => elegir_modo_resolve(app, &id["resolve-modo-".len()..]),
                 "diagnostico" => abrir_diagnostico(app),
                 "clear-cache" => {
                     let antes = cache::tamano(app);

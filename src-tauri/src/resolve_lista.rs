@@ -20,6 +20,10 @@
 //!
 //! `vistas` (resolve-lista.json en la configuración de la app): lo que ya se vio alguna vez en la
 //! lista o se añadió. Si alguien quita una biblioteca a propósito desde Resolve, no se le vuelve a poner.
+//!
+//! `modo` (1.40, resolve-modo.json): qué hace la app con Resolve en ESTE equipo. Automático (la oficina
+//! si responde, si no ZeroTier), Local u ZeroTier elegidos a mano, o Apagado: en un equipo sin Resolve
+//! la app no mira ni toca la lista. Se elige en el menú ⋮ de la app o en la pestaña Resolve del OS.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -247,6 +251,94 @@ fn guardar_vistas(p: Option<&Path>, v: &Vistas) {
     }
 }
 
+// ── El modo de ESTE equipo (1.40, 12-nov-2026) ───────────────────────────────────────────────
+//
+// Munka: «quiero un botón que selecciones si estoy local o por ZeroTier o apagado para las personas
+// que no tienen Resolve». Automático sigue siendo lo de la 1.39: la oficina si responde, si no
+// ZeroTier. Local y ZeroTier fijan la dirección aunque la otra responda (por ejemplo, para dejarlo
+// listo antes de salir de la oficina). Apagado: la app no mira la lista ni la toca, ni la red.
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Modo {
+    #[default]
+    Auto,
+    Oficina,
+    Zerotier,
+    Apagado,
+}
+
+impl Modo {
+    pub(crate) const TODOS: [Modo; 4] = [Modo::Auto, Modo::Oficina, Modo::Zerotier, Modo::Apagado];
+
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            Modo::Auto => "auto",
+            Modo::Oficina => "oficina",
+            Modo::Zerotier => "zerotier",
+            Modo::Apagado => "apagado",
+        }
+    }
+
+    pub(crate) fn de_id(s: &str) -> Option<Modo> {
+        Modo::TODOS.into_iter().find(|m| m.id() == s)
+    }
+
+    /// Lo que dice el menú ⋮.
+    pub(crate) fn etiqueta(self) -> &'static str {
+        match self {
+            Modo::Auto => "Automático (la oficina si responde)",
+            Modo::Oficina => "Local (red de la oficina)",
+            Modo::Zerotier => "ZeroTier (desde fuera)",
+            Modo::Apagado => "Apagado (este equipo no usa Resolve)",
+        }
+    }
+}
+
+const APAGADO: &str = "Resolve está apagado en este equipo (menú ⋮ de la app, «Resolve en este equipo»).";
+
+#[derive(Serialize, Deserialize, Default)]
+struct ConfigModo {
+    #[serde(default)]
+    modo: Modo,
+}
+
+fn ruta_modo<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("resolve-modo.json"))
+}
+
+/// El modo guardado de este equipo; Automático si no hay nada o el archivo no se entiende.
+pub(crate) fn modo<R: Runtime>(app: &AppHandle<R>) -> Modo {
+    ruta_modo(app)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<ConfigModo>(&s).ok())
+        .map(|c| c.modo)
+        .unwrap_or_default()
+}
+
+pub(crate) fn guardar_modo<R: Runtime>(app: &AppHandle<R>, m: Modo) -> Result<(), String> {
+    let p = ruta_modo(app).ok_or("No encuentro la carpeta de configuración de la app.")?;
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let txt = serde_json::to_string(&ConfigModo { modo: m }).map_err(|e| e.to_string())?;
+    std::fs::write(&p, txt).map_err(|e| format!("No pude guardar el modo de Resolve: {e}"))
+}
+
+#[tauri::command]
+pub fn resolve_modo<R: Runtime>(app: AppHandle<R>) -> Modo {
+    modo(&app)
+}
+
+/// Guarda el modo y avisa a las pestañas (`ls-resolve-modo`) para que la del OS se ponga al día.
+/// Aplicarlo a la lista lo hace quien llama (la página, o el menú ⋮ con `aplicar_modo`).
+#[tauri::command]
+pub fn resolve_modo_poner<R: Runtime>(app: AppHandle<R>, modo: Modo) -> Result<Modo, String> {
+    guardar_modo(&app, modo)?;
+    let _ = tauri::Emitter::emit(&app, "ls-resolve-modo", modo.id());
+    Ok(modo)
+}
+
 // ── Los comandos ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -287,6 +379,9 @@ fn mirar(ruta: Option<PathBuf>, vistas_en: Option<&Path>, abierto: fn() -> bool)
 
 #[tauri::command]
 pub async fn resolve_lista<R: Runtime>(app: AppHandle<R>) -> Estado {
+    if modo(&app) == Modo::Apagado {
+        return sin_lista(APAGADO);
+    }
     let vistas = ruta_vistas(&app);
     tauri::async_runtime::spawn_blocking(move || {
         let _g = CANDADO.lock().unwrap_or_else(|e| e.into_inner());
@@ -366,6 +461,9 @@ fn agregar(ruta: Option<PathBuf>, vistas_en: Option<&Path>, paso: Paso, abierto:
 
 #[tauri::command]
 pub async fn resolve_lista_agregar<R: Runtime>(app: AppHandle<R>, paso: Paso) -> Result<Agregado, String> {
+    if modo(&app) == Modo::Apagado {
+        return Err(APAGADO.into());
+    }
     let vistas = ruta_vistas(&app);
     tauri::async_runtime::spawn_blocking(move || {
         let _g = CANDADO.lock().unwrap_or_else(|e| e.into_inner());
@@ -414,6 +512,9 @@ fn renombrar(ruta: Option<PathBuf>, vistas_en: Option<&Path>, renombres: &[Renom
 
 #[tauri::command]
 pub async fn resolve_lista_renombrar<R: Runtime>(app: AppHandle<R>, renombres: Vec<Renombre>) -> Result<Renombrado, String> {
+    if modo(&app) == Modo::Apagado {
+        return Err(APAGADO.into());
+    }
     let vistas = ruta_vistas(&app);
     tauri::async_runtime::spawn_blocking(move || {
         let _g = CANDADO.lock().unwrap_or_else(|e| e.into_inner());
@@ -534,73 +635,126 @@ fn llega(ip: &str) -> bool {
 
 #[derive(Serialize, Debug, PartialEq)]
 pub struct RedLista {
-    /// Por dónde llega este equipo al servidor ahora. None: no llega por ninguna (o no hay lista).
-    red: Option<Red>,
+    /// El modo de este equipo (1.40). Con `apagado` no se mira nada y todo va a cero.
+    pub(crate) modo: Modo,
+    /// Por dónde entra ahora: la red que se eligió a mano, o en Automático por dónde llega este equipo
+    /// al servidor. None: no llega por ninguna, apagado, o la lista no tiene nada de este servidor.
+    pub(crate) red: Option<Red>,
+    /// Elegida a mano: si esa dirección contesta ahora. En Automático, None (ya se eligió la que contesta).
+    pub(crate) responde: Option<bool>,
     /// Cuántas bibliotecas entran por cada dirección, tal como quedó la lista.
-    oficina: u32,
-    zerotier: u32,
+    pub(crate) oficina: u32,
+    pub(crate) zerotier: u32,
     /// Las que cambiaron de dirección en esta llamada.
-    cambiadas: Vec<String>,
+    pub(crate) cambiadas: Vec<String>,
     /// Las que están con la otra dirección y no se cambiaron (Resolve abierto, o solo se preguntó).
-    pendientes: u32,
-    abierto: bool,
+    pub(crate) pendientes: u32,
+    pub(crate) abierto: bool,
     copia: Option<String>,
 }
 
-fn red_lista(ruta: Option<PathBuf>, aplicar: bool, abierto: fn() -> bool, llega: &dyn Fn(&str) -> bool) -> Result<RedLista, String> {
+fn red_lista(ruta: Option<PathBuf>, aplicar: bool, modo: Modo, abierto: fn() -> bool, llega: &dyn Fn(&str) -> bool) -> Result<RedLista, String> {
     let (oficina, zerotier) = SERVIDOR;
     let cuenta = |texto: &str, ip: &str| texto.lines().filter_map(leer_linea).filter(|l| l.ip == ip).count() as u32;
-    let nada = |red, of, zt, pendientes, abierto| RedLista { red, oficina: of, zerotier: zt, cambiadas: vec![], pendientes, abierto, copia: None };
-    let Some(ruta) = ruta else { return Ok(nada(None, 0, 0, 0, false)) };
+    let vacia = RedLista { modo, red: None, responde: None, oficina: 0, zerotier: 0, cambiadas: vec![], pendientes: 0, abierto: false, copia: None };
+    // Apagado: ni se lee la lista ni se pregunta a la red.
+    if modo == Modo::Apagado {
+        return Ok(vacia);
+    }
+    let Some(ruta) = ruta else { return Ok(vacia) };
     let actual = match std::fs::read_to_string(&ruta) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(nada(None, 0, 0, 0, false)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vacia),
         Err(e) => return Err(format!("No pude leer la lista de Resolve: {e}")),
     };
     let (of, zt) = (cuenta(&actual, oficina), cuenta(&actual, zerotier));
     // Sin ninguna línea de este servidor no hay nada que mirar: ni se toca la red.
     if of + zt == 0 {
-        return Ok(nada(None, 0, 0, 0, false));
+        return Ok(vacia);
     }
-    let en_oficina = llega(oficina);
-    let Some(red) = red_de(en_oficina, !en_oficina && llega(zerotier)) else { return Ok(nada(None, of, zt, 0, abierto())) };
+    let (red, responde) = match modo {
+        // A mano: esa dirección aunque la otra conteste. Se pregunta solo para poder decir si contesta.
+        Modo::Oficina => (Some(Red::Oficina), Some(llega(oficina))),
+        Modo::Zerotier => (Some(Red::Zerotier), Some(llega(zerotier))),
+        _ => {
+            let en_oficina = llega(oficina);
+            (red_de(en_oficina, !en_oficina && llega(zerotier)), None)
+        }
+    };
+    let base = RedLista { modo, red, responde, oficina: of, zerotier: zt, cambiadas: vec![], pendientes: 0, abierto: false, copia: None };
+    let Some(red) = red else { return Ok(RedLista { abierto: abierto(), ..base }) };
     let (de, a, pendientes) = match red {
         Red::Oficina => (zerotier, oficina, zt),
         Red::Zerotier => (oficina, zerotier, of),
     };
     if pendientes == 0 {
-        return Ok(nada(Some(red), of, zt, 0, abierto()));
+        return Ok(RedLista { abierto: abierto(), ..base });
     }
     if !aplicar || abierto() {
-        return Ok(nada(Some(red), of, zt, pendientes, abierto()));
+        return Ok(RedLista { pendientes, abierto: abierto(), ..base });
     }
     let (texto, cambiadas) = cambiar_direccion(&actual, de, a);
     let copia = copiar_lista(&ruta)?;
     // Última comprobación justo antes de escribir: si Resolve se abrió mientras tanto, nada.
     if abierto() {
-        return Ok(nada(Some(red), of, zt, pendientes, true));
+        return Ok(RedLista { pendientes, abierto: true, ..base });
     }
     // Aparte y de un golpe: si esto se corta a medias, la lista sigue entera.
     let temporal = ruta.with_extension("labstream-nueva");
     std::fs::write(&temporal, &texto).map_err(|e| format!("No pude escribir en la lista de Resolve: {e}"))?;
     std::fs::rename(&temporal, &ruta).map_err(|e| format!("No pude escribir en la lista de Resolve: {e}"))?;
     Ok(RedLista {
-        red: Some(red),
         oficina: cuenta(&texto, oficina),
         zerotier: cuenta(&texto, zerotier),
         cambiadas,
-        pendientes: 0,
-        abierto: false,
         copia: copia.file_name().and_then(|n| n.to_str()).map(String::from),
+        ..base
     })
 }
 
-/// `aplicar: false` solo dice por dónde llega el equipo y cómo está la lista (para el botón del OS).
+/// Aplica el modo guardado ahora mismo (el menú ⋮, al elegir). Bloquea: llamarlo fuera del hilo de la ventana.
+pub(crate) fn aplicar_modo<R: Runtime>(app: &AppHandle<R>) -> Result<RedLista, String> {
+    let m = modo(app);
+    let _g = CANDADO.lock().unwrap_or_else(|e| e.into_inner());
+    red_lista(ruta_lista(), true, m, resolve_abierto, &llega)
+}
+
+/// El aviso del menú ⋮ después de elegir: qué quedó y qué falta.
+pub(crate) fn frase_de_modo(r: &RedLista) -> String {
+    if r.modo == Modo::Apagado {
+        return "Resolve apagado en este equipo: la app ya no toca la lista de bibliotecas.".into();
+    }
+    let total = r.oficina + r.zerotier;
+    let Some(red) = r.red else {
+        return if total == 0 {
+            "Listo. Este equipo todavía no tiene bibliotecas del servidor en Resolve: las nuevas entrarán así.".into()
+        } else {
+            "Automático: ahora este equipo no llega al servidor ni por la oficina ni por ZeroTier. No cambié nada.".into()
+        };
+    };
+    let donde = if red == Red::Oficina { "la red de la oficina" } else { "ZeroTier" };
+    let mut s = if !r.cambiadas.is_empty() {
+        let n = r.cambiadas.len();
+        format!("Resolve entra por {donde}: {} a esa dirección.", if n == 1 { "1 biblioteca pasó".to_string() } else { format!("{n} bibliotecas pasaron") })
+    } else if r.pendientes > 0 && r.abierto {
+        format!("Resolve entrará por {donde}: ciérralo y las bibliotecas se cambian.")
+    } else {
+        format!("Resolve entra por {donde}. Todo en orden.")
+    };
+    if r.responde == Some(false) {
+        s.push_str(&format!(" Ojo: ahora {donde} no responde."));
+    }
+    s
+}
+
+/// `aplicar: false` solo dice por dónde entra y cómo está la lista (para el bloque del OS). Sigue el
+/// modo guardado de este equipo.
 #[tauri::command]
-pub async fn resolve_lista_red(aplicar: bool) -> Result<RedLista, String> {
+pub async fn resolve_lista_red<R: Runtime>(app: AppHandle<R>, aplicar: bool) -> Result<RedLista, String> {
+    let m = modo(&app);
     tauri::async_runtime::spawn_blocking(move || {
         let _g = CANDADO.lock().unwrap_or_else(|e| e.into_inner());
-        red_lista(ruta_lista(), aplicar, resolve_abierto, &llega)
+        red_lista(ruta_lista(), aplicar, m, resolve_abierto, &llega)
     })
     .await
     .map_err(|e| format!("No pude mirar por dónde entra Resolve: {e}"))?
@@ -805,6 +959,54 @@ mod pruebas {
 
     // ── La oficina o ZeroTier ──
 
+    fn red_auto(ruta: Option<PathBuf>, aplicar: bool, abierto: fn() -> bool, llega: &dyn Fn(&str) -> bool) -> Result<RedLista, String> {
+        red_lista(ruta, aplicar, Modo::Auto, abierto, llega)
+    }
+
+    #[test]
+    fn el_modo_viaja_con_su_nombre_y_por_defecto_es_automatico() {
+        for m in Modo::TODOS {
+            assert_eq!(Modo::de_id(m.id()), Some(m));
+            assert_eq!(serde_json::to_string(&m).unwrap(), format!("\"{}\"", m.id()));
+        }
+        assert_eq!(Modo::de_id("otro"), None);
+        assert_eq!(serde_json::from_str::<ConfigModo>("{}").unwrap().modo, Modo::Auto);
+    }
+
+    #[test]
+    fn a_mano_manda_la_red_elegida_y_apagado_no_toca_nada() {
+        let d = carpeta("modo");
+        let lista = d.join("dblist.conf");
+        let de_oficina = format!("A{OF}:{OF}:camilo*:k1:A:QPSQL\r\nB{OF}:{OF}:camilo:k1:B:QPSQL\r\n");
+        std::fs::write(&lista, &de_oficina).unwrap();
+        let en_oficina = |ip: &str| ip == OF || ip == ZT;
+
+        // Apagado: ni la lista ni la red.
+        let nunca = |_: &str| -> bool { panic!("apagado: no se pregunta a la red") };
+        let r = red_lista(Some(lista.clone()), true, Modo::Apagado, cerrado, &nunca).unwrap();
+        assert_eq!((r.modo, r.red, r.oficina, r.zerotier, r.cambiadas.len()), (Modo::Apagado, None, 0, 0, 0));
+        assert_eq!(std::fs::read_to_string(&lista).unwrap(), de_oficina);
+        assert!(frase_de_modo(&r).contains("apagado"));
+
+        // ZeroTier a mano estando en la oficina (las dos contestan): pasan a ZeroTier igual.
+        let r = red_lista(Some(lista.clone()), true, Modo::Zerotier, cerrado, &en_oficina).unwrap();
+        assert_eq!((r.red, r.responde, r.oficina, r.zerotier), (Some(Red::Zerotier), Some(true), 0, 2));
+        assert!(frase_de_modo(&r).starts_with("Resolve entra por ZeroTier: 2 bibliotecas pasaron"));
+
+        // Local a mano desde casa (solo contesta ZeroTier): vuelven a la oficina y avisa que no responde.
+        let en_casa = |ip: &str| ip == ZT;
+        let r = red_lista(Some(lista.clone()), true, Modo::Oficina, cerrado, &en_casa).unwrap();
+        assert_eq!((r.red, r.responde, r.oficina, r.zerotier), (Some(Red::Oficina), Some(false), 2, 0));
+        assert!(frase_de_modo(&r).ends_with("Ojo: ahora la red de la oficina no responde."));
+        assert_eq!(std::fs::read_to_string(&lista).unwrap(), de_oficina);
+
+        // Con Resolve abierto: queda pendiente y lo dice.
+        let r = red_lista(Some(lista.clone()), true, Modo::Zerotier, abierto, &en_oficina).unwrap();
+        assert_eq!((r.pendientes, r.abierto), (2, true));
+        assert_eq!(frase_de_modo(&r), "Resolve entrará por ZeroTier: ciérralo y las bibliotecas se cambian.");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     const OF: &str = "192.168.0.22";
     const ZT: &str = "10.61.5.96";
 
@@ -847,35 +1049,35 @@ mod pruebas {
         let sin_red = |_: &str| false;
 
         // En la oficina y ya con la dirección de oficina: nada, y sin copia.
-        let r = red_lista(Some(lista.clone()), true, cerrado, &en_oficina).unwrap();
+        let r = red_auto(Some(lista.clone()), true, cerrado, &en_oficina).unwrap();
         assert_eq!((r.red, r.oficina, r.zerotier, r.pendientes, r.copia.is_some()), (Some(Red::Oficina), 2, 0, 0, false));
 
         // En casa: solo preguntar no cambia nada; con Resolve abierto, tampoco.
-        let r = red_lista(Some(lista.clone()), false, cerrado, &en_casa).unwrap();
+        let r = red_auto(Some(lista.clone()), false, cerrado, &en_casa).unwrap();
         assert_eq!((r.red, r.pendientes, r.cambiadas.len()), (Some(Red::Zerotier), 2, 0));
-        let r = red_lista(Some(lista.clone()), true, abierto, &en_casa).unwrap();
+        let r = red_auto(Some(lista.clone()), true, abierto, &en_casa).unwrap();
         assert_eq!((r.pendientes, r.abierto), (2, true));
         assert_eq!(std::fs::read_to_string(&lista).unwrap(), de_oficina);
 
         // En casa con Resolve cerrado: pasan a ZeroTier, con copia de cómo estaba.
-        let r = red_lista(Some(lista.clone()), true, cerrado, &en_casa).unwrap();
+        let r = red_auto(Some(lista.clone()), true, cerrado, &en_casa).unwrap();
         assert_eq!((r.red, r.oficina, r.zerotier, r.pendientes), (Some(Red::Zerotier), 0, 2, 0));
         assert_eq!(r.cambiadas, vec!["A".to_string(), "B".to_string()]);
         assert_eq!(std::fs::read_to_string(d.join(r.copia.unwrap())).unwrap(), de_oficina);
         assert!(std::fs::read_to_string(&lista).unwrap().contains(&format!("A{ZT}:{ZT}:camilo*:k1:A:QPSQL\r\n")));
 
         // Sin red no se toca; de vuelta en la oficina, vuelve a como estaba.
-        let r = red_lista(Some(lista.clone()), true, cerrado, &sin_red).unwrap();
+        let r = red_auto(Some(lista.clone()), true, cerrado, &sin_red).unwrap();
         assert_eq!((r.red, r.zerotier, r.cambiadas.len()), (None, 2, 0));
-        let r = red_lista(Some(lista.clone()), true, cerrado, &en_oficina).unwrap();
+        let r = red_auto(Some(lista.clone()), true, cerrado, &en_oficina).unwrap();
         assert_eq!((r.red, r.oficina, r.zerotier), (Some(Red::Oficina), 2, 0));
         assert_eq!(std::fs::read_to_string(&lista).unwrap(), de_oficina);
 
         // Sin lista, o con una lista de otro servidor: ni se pregunta a la red.
         let nunca = |_: &str| -> bool { panic!("no hay nada de este servidor: no se toca la red") };
-        assert_eq!(red_lista(Some(d.join("no-esta.conf")), true, cerrado, &nunca).unwrap().red, None);
+        assert_eq!(red_auto(Some(d.join("no-esta.conf")), true, cerrado, &nunca).unwrap().red, None);
         std::fs::write(&lista, "C6.6.6.6:6.6.6.6:camilo:k1:C:QPSQL\n").unwrap();
-        assert_eq!(red_lista(Some(lista.clone()), true, cerrado, &nunca).unwrap().red, None);
+        assert_eq!(red_auto(Some(lista.clone()), true, cerrado, &nunca).unwrap().red, None);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -890,14 +1092,14 @@ mod pruebas {
         std::fs::write(&lista, &real).unwrap();
         let en_casa = |ip: &str| ip == ZT;
         let en_oficina = |ip: &str| ip == OF || ip == ZT;
-        let antes = red_lista(Some(lista.clone()), false, cerrado, &en_oficina).unwrap();
-        let ida = red_lista(Some(lista.clone()), true, cerrado, &en_casa).unwrap();
+        let antes = red_auto(Some(lista.clone()), false, cerrado, &en_oficina).unwrap();
+        let ida = red_auto(Some(lista.clone()), true, cerrado, &en_casa).unwrap();
         println!("en la oficina: {} por oficina, {} por ZeroTier", antes.oficina, antes.zerotier);
         println!("en casa: {} cambiaron; quedan {} por oficina, {} por ZeroTier", ida.cambiadas.len(), ida.oficina, ida.zerotier);
         assert_eq!((ida.oficina, ida.zerotier), (0, antes.oficina + antes.zerotier));
         let lineas = |t: &str| t.lines().count();
         assert_eq!(lineas(&std::fs::read_to_string(&lista).unwrap()), lineas(&real), "ni una línea de más ni de menos");
-        let vuelta = red_lista(Some(lista.clone()), true, cerrado, &en_oficina).unwrap();
+        let vuelta = red_auto(Some(lista.clone()), true, cerrado, &en_oficina).unwrap();
         println!("de vuelta: {} cambiaron; quedan {} por oficina", vuelta.cambiadas.len(), vuelta.oficina);
         if antes.zerotier == 0 {
             assert!(std::fs::read_to_string(&lista).unwrap() == real, "de vuelta en la oficina, la lista es idéntica a la de verdad");
@@ -911,7 +1113,7 @@ mod pruebas {
     #[ignore]
     fn en_este_equipo_sin_escribir() {
         let t0 = std::time::Instant::now();
-        let r = red_lista(ruta_lista(), false, resolve_abierto, &llega).unwrap();
+        let r = red_auto(ruta_lista(), false, resolve_abierto, &llega).unwrap();
         println!("{r:?} en {:?}", t0.elapsed());
         println!("oficina responde: {}, zerotier responde: {}, otra dirección: {}", llega(OF), llega(ZT), llega("192.168.0.40"));
     }
