@@ -423,6 +423,189 @@ pub async fn resolve_lista_renombrar<R: Runtime>(app: AppHandle<R>, renombres: V
     .map_err(|e| format!("No pude cambiar los nombres: {e}"))?
 }
 
+// ── Por dónde se llega al servidor: la oficina o ZeroTier (1.39, 12-nov-2026) ──────────────────
+//
+// Munka: «mi Mac a veces lo utilizo en local al llevarlo a la oficina y por ZeroTier desde la casa».
+// Cada línea de la lista lleva la dirección del servidor. Un equipo con las líneas de la oficina no
+// abría ninguna biblioteca desde casa, y las nuevas le entraban también con la dirección de oficina.
+// Ahora la app mira por dónde llega al servidor y deja las líneas con ESA dirección:
+//   · si responde la de la oficina, la oficina, AUNQUE ZeroTier también responda (Munka: «los equipos
+//     que están locales y por ZeroTier solo se deben conectar por local, porque es más rápido»);
+//   · si solo responde ZeroTier, ZeroTier;
+//   · si no responde ninguna, no se toca nada.
+// Es el mismo servidor (el NAS tiene las dos direcciones), así que usuario y clave valen igual. Las
+// dos direcciones están escritas AQUÍ y no las manda la página: la clave de una línea no puede acabar
+// apuntando a otro servidor. Las líneas de cualquier otra dirección no se tocan. Mismas reglas que
+// siempre: Resolve cerrado y una copia antes.
+
+/// El servidor de las bibliotecas: (en la oficina, por ZeroTier). Las mismas que `IPS` de carpetas_os.
+const SERVIDOR: (&str, &str) = ("192.168.0.22", "10.61.5.96");
+const PUERTO_POSTGRES: u16 = 5432;
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Red {
+    Oficina,
+    Zerotier,
+}
+
+/// Por dónde entrar. La oficina gana siempre que responda.
+pub(crate) fn red_de(oficina: bool, zerotier: bool) -> Option<Red> {
+    if oficina {
+        Some(Red::Oficina)
+    } else if zerotier {
+        Some(Red::Zerotier)
+    } else {
+        None
+    }
+}
+
+/// La misma línea con otra dirección. Usuario (con su marca «*»), clave y base se quedan.
+fn linea_con_otra_direccion(l: &str, de: &str, a: &str) -> String {
+    let cuerpo = l.trim_end_matches(['\r', '\n']);
+    let fin = &l[cuerpo.len()..];
+    let mut c: Vec<String> = cuerpo.split(':').map(String::from).collect();
+    if let Some(base) = c[0].strip_suffix(de) {
+        c[0] = format!("{base}{a}");
+    }
+    c[1] = a.to_string();
+    format!("{}{fin}", c.join(":"))
+}
+
+/// El texto de la lista con las líneas de la dirección `de` pasadas a `a`, y qué bibliotecas cambiaron.
+/// Si una biblioteca ya tenía línea con `a` (para el mismo usuario), la de `de` sobra y se quita: cada
+/// biblioteca sale una sola vez. Si la que sobra era la marcada como última abierta, la marca pasa a
+/// la que se queda. Todo lo demás sale idéntico, con sus saltos de línea.
+pub(crate) fn cambiar_direccion(actual: &str, de: &str, a: &str) -> (String, Vec<String>) {
+    let lineas: Vec<&str> = actual.split_inclusive('\n').collect();
+    let leidas: Vec<Option<Linea>> = lineas.iter().map(|l| leer_linea(l)).collect();
+    let marcada = |l: &str| l.split(':').nth(2).is_some_and(|u| u.ends_with('*'));
+    let gemela = |x: &Linea| leidas.iter().position(|y| y.as_ref().is_some_and(|y| y.ip == a && y.rol == x.rol && y.base == x.base));
+    // Las gemelas que heredan la marca de una línea que se quita.
+    let heredan: BTreeSet<usize> = lineas
+        .iter()
+        .zip(&leidas)
+        .filter_map(|(l, x)| x.as_ref().filter(|x| x.ip == de && marcada(l)).and_then(gemela))
+        .collect();
+    let mut cambiadas: Vec<String> = Vec::new();
+    let mut fuera = String::with_capacity(actual.len());
+    for (i, (l, x)) in lineas.iter().zip(&leidas).enumerate() {
+        match x {
+            Some(x) if x.ip == de => {
+                if gemela(x).is_none() {
+                    fuera.push_str(&linea_con_otra_direccion(l, de, a));
+                }
+                if !cambiadas.contains(&x.base) {
+                    cambiadas.push(x.base.clone());
+                }
+            }
+            Some(_) if heredan.contains(&i) && !marcada(l) => {
+                let mut c: Vec<String> = l.split(':').map(String::from).collect();
+                c[2].push('*');
+                fuera.push_str(&c.join(":"));
+            }
+            _ => fuera.push_str(l),
+        }
+    }
+    (fuera, cambiadas)
+}
+
+/// ¿Hay un PostgreSQL en esa dirección? Se le hace la pregunta con la que empieza cualquier conexión
+/// (SSLRequest) y tiene que contestar «S» o «N»: que el puerto esté abierto no basta (en casa, esa
+/// misma dirección puede ser otro aparato). No manda usuario ni clave.
+fn hay_postgres(ip: &str, espera: std::time::Duration) -> bool {
+    use std::io::Read;
+    use std::net::{IpAddr, SocketAddr, TcpStream};
+    let Ok(ip) = ip.parse::<IpAddr>() else { return false };
+    let Ok(mut s) = TcpStream::connect_timeout(&SocketAddr::new(ip, PUERTO_POSTGRES), espera) else { return false };
+    let _ = s.set_read_timeout(Some(espera));
+    let _ = s.set_write_timeout(Some(espera));
+    if s.write_all(&[0, 0, 0, 8, 4, 210, 22, 47]).is_err() {
+        return false;
+    }
+    let mut r = [0u8; 1];
+    s.read_exact(&mut r).is_ok() && matches!(r[0], b'S' | b'N')
+}
+
+fn llega(ip: &str) -> bool {
+    // En la oficina contesta en milisegundos; por ZeroTier, con el túnel recién levantado, tarda más.
+    hay_postgres(ip, std::time::Duration::from_millis(if ip == SERVIDOR.0 { 1500 } else { 4000 }))
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct RedLista {
+    /// Por dónde llega este equipo al servidor ahora. None: no llega por ninguna (o no hay lista).
+    red: Option<Red>,
+    /// Cuántas bibliotecas entran por cada dirección, tal como quedó la lista.
+    oficina: u32,
+    zerotier: u32,
+    /// Las que cambiaron de dirección en esta llamada.
+    cambiadas: Vec<String>,
+    /// Las que están con la otra dirección y no se cambiaron (Resolve abierto, o solo se preguntó).
+    pendientes: u32,
+    abierto: bool,
+    copia: Option<String>,
+}
+
+fn red_lista(ruta: Option<PathBuf>, aplicar: bool, abierto: fn() -> bool, llega: &dyn Fn(&str) -> bool) -> Result<RedLista, String> {
+    let (oficina, zerotier) = SERVIDOR;
+    let cuenta = |texto: &str, ip: &str| texto.lines().filter_map(leer_linea).filter(|l| l.ip == ip).count() as u32;
+    let nada = |red, of, zt, pendientes, abierto| RedLista { red, oficina: of, zerotier: zt, cambiadas: vec![], pendientes, abierto, copia: None };
+    let Some(ruta) = ruta else { return Ok(nada(None, 0, 0, 0, false)) };
+    let actual = match std::fs::read_to_string(&ruta) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(nada(None, 0, 0, 0, false)),
+        Err(e) => return Err(format!("No pude leer la lista de Resolve: {e}")),
+    };
+    let (of, zt) = (cuenta(&actual, oficina), cuenta(&actual, zerotier));
+    // Sin ninguna línea de este servidor no hay nada que mirar: ni se toca la red.
+    if of + zt == 0 {
+        return Ok(nada(None, 0, 0, 0, false));
+    }
+    let en_oficina = llega(oficina);
+    let Some(red) = red_de(en_oficina, !en_oficina && llega(zerotier)) else { return Ok(nada(None, of, zt, 0, abierto())) };
+    let (de, a, pendientes) = match red {
+        Red::Oficina => (zerotier, oficina, zt),
+        Red::Zerotier => (oficina, zerotier, of),
+    };
+    if pendientes == 0 {
+        return Ok(nada(Some(red), of, zt, 0, abierto()));
+    }
+    if !aplicar || abierto() {
+        return Ok(nada(Some(red), of, zt, pendientes, abierto()));
+    }
+    let (texto, cambiadas) = cambiar_direccion(&actual, de, a);
+    let copia = copiar_lista(&ruta)?;
+    // Última comprobación justo antes de escribir: si Resolve se abrió mientras tanto, nada.
+    if abierto() {
+        return Ok(nada(Some(red), of, zt, pendientes, true));
+    }
+    // Aparte y de un golpe: si esto se corta a medias, la lista sigue entera.
+    let temporal = ruta.with_extension("labstream-nueva");
+    std::fs::write(&temporal, &texto).map_err(|e| format!("No pude escribir en la lista de Resolve: {e}"))?;
+    std::fs::rename(&temporal, &ruta).map_err(|e| format!("No pude escribir en la lista de Resolve: {e}"))?;
+    Ok(RedLista {
+        red: Some(red),
+        oficina: cuenta(&texto, oficina),
+        zerotier: cuenta(&texto, zerotier),
+        cambiadas,
+        pendientes: 0,
+        abierto: false,
+        copia: copia.file_name().and_then(|n| n.to_str()).map(String::from),
+    })
+}
+
+/// `aplicar: false` solo dice por dónde llega el equipo y cómo está la lista (para el botón del OS).
+#[tauri::command]
+pub async fn resolve_lista_red(aplicar: bool) -> Result<RedLista, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _g = CANDADO.lock().unwrap_or_else(|e| e.into_inner());
+        red_lista(ruta_lista(), aplicar, resolve_abierto, &llega)
+    })
+    .await
+    .map_err(|e| format!("No pude mirar por dónde entra Resolve: {e}"))?
+}
+
 #[cfg(test)]
 mod pruebas {
     use super::*;
@@ -618,5 +801,118 @@ mod pruebas {
         assert!(agregar(Some(lista.clone()), Some(&vistas), ajeno, cerrado).is_err());
         assert_eq!(std::fs::read_to_string(&lista).unwrap(), LISTA);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ── La oficina o ZeroTier ──
+
+    const OF: &str = "192.168.0.22";
+    const ZT: &str = "10.61.5.96";
+
+    #[test]
+    fn la_oficina_gana_aunque_zerotier_tambien_responda() {
+        assert_eq!(red_de(true, true), Some(Red::Oficina));
+        assert_eq!(red_de(true, false), Some(Red::Oficina));
+        assert_eq!(red_de(false, true), Some(Red::Zerotier));
+        assert_eq!(red_de(false, false), None);
+    }
+
+    #[test]
+    fn cambia_la_direccion_y_conserva_usuario_clave_marca_y_lo_ajeno() {
+        let antes = format!("Local Database:C/x:y:z:w:DISK\r\nA{OF}:{OF}:camilo*:k1:A:QPSQL\r\nB{OF}:{OF}:jona:k2:B:QPSQL\r\nC6.6.6.6:6.6.6.6:camilo:k1:C:QPSQL\r\n");
+        let (texto, cambiadas) = cambiar_direccion(&antes, OF, ZT);
+        assert_eq!(texto, format!("Local Database:C/x:y:z:w:DISK\r\nA{ZT}:{ZT}:camilo*:k1:A:QPSQL\r\nB{ZT}:{ZT}:jona:k2:B:QPSQL\r\nC6.6.6.6:6.6.6.6:camilo:k1:C:QPSQL\r\n"));
+        assert_eq!(cambiadas, vec!["A".to_string(), "B".to_string()]);
+        // Y de vuelta queda como estaba, letra por letra.
+        assert_eq!(cambiar_direccion(&texto, ZT, OF).0, antes);
+        // Nada que cambiar: idéntico.
+        assert_eq!(cambiar_direccion(&antes, ZT, OF), (antes.clone(), vec![]));
+    }
+
+    #[test]
+    fn si_ya_estaba_con_la_otra_direccion_no_sale_dos_veces_y_la_marca_se_queda() {
+        let antes = format!("A{OF}:{OF}:camilo*:k1:A:QPSQL\nA{ZT}:{ZT}:camilo:k1:A:QPSQL\nA{ZT}:{ZT}:jona:k2:A:QPSQL\nB{OF}:{OF}:camilo:k1:B:QPSQL\n");
+        let (texto, cambiadas) = cambiar_direccion(&antes, OF, ZT);
+        assert_eq!(texto, format!("A{ZT}:{ZT}:camilo*:k1:A:QPSQL\nA{ZT}:{ZT}:jona:k2:A:QPSQL\nB{ZT}:{ZT}:camilo:k1:B:QPSQL\n"));
+        assert_eq!(cambiadas, vec!["A".to_string(), "B".to_string()]);
+    }
+
+    #[test]
+    fn la_lista_sigue_a_la_red_con_resolve_cerrado_y_con_copia() {
+        let d = carpeta("red");
+        let lista = d.join("dblist.conf");
+        let de_oficina = format!("Local Database:C/x:y:z:w:DISK\r\nA{OF}:{OF}:camilo*:k1:A:QPSQL\r\nB{OF}:{OF}:camilo:k1:B:QPSQL\r\n");
+        std::fs::write(&lista, &de_oficina).unwrap();
+        let en_oficina = |ip: &str| ip == OF || ip == ZT; // en la oficina responden las dos
+        let en_casa = |ip: &str| ip == ZT;
+        let sin_red = |_: &str| false;
+
+        // En la oficina y ya con la dirección de oficina: nada, y sin copia.
+        let r = red_lista(Some(lista.clone()), true, cerrado, &en_oficina).unwrap();
+        assert_eq!((r.red, r.oficina, r.zerotier, r.pendientes, r.copia.is_some()), (Some(Red::Oficina), 2, 0, 0, false));
+
+        // En casa: solo preguntar no cambia nada; con Resolve abierto, tampoco.
+        let r = red_lista(Some(lista.clone()), false, cerrado, &en_casa).unwrap();
+        assert_eq!((r.red, r.pendientes, r.cambiadas.len()), (Some(Red::Zerotier), 2, 0));
+        let r = red_lista(Some(lista.clone()), true, abierto, &en_casa).unwrap();
+        assert_eq!((r.pendientes, r.abierto), (2, true));
+        assert_eq!(std::fs::read_to_string(&lista).unwrap(), de_oficina);
+
+        // En casa con Resolve cerrado: pasan a ZeroTier, con copia de cómo estaba.
+        let r = red_lista(Some(lista.clone()), true, cerrado, &en_casa).unwrap();
+        assert_eq!((r.red, r.oficina, r.zerotier, r.pendientes), (Some(Red::Zerotier), 0, 2, 0));
+        assert_eq!(r.cambiadas, vec!["A".to_string(), "B".to_string()]);
+        assert_eq!(std::fs::read_to_string(d.join(r.copia.unwrap())).unwrap(), de_oficina);
+        assert!(std::fs::read_to_string(&lista).unwrap().contains(&format!("A{ZT}:{ZT}:camilo*:k1:A:QPSQL\r\n")));
+
+        // Sin red no se toca; de vuelta en la oficina, vuelve a como estaba.
+        let r = red_lista(Some(lista.clone()), true, cerrado, &sin_red).unwrap();
+        assert_eq!((r.red, r.zerotier, r.cambiadas.len()), (None, 2, 0));
+        let r = red_lista(Some(lista.clone()), true, cerrado, &en_oficina).unwrap();
+        assert_eq!((r.red, r.oficina, r.zerotier), (Some(Red::Oficina), 2, 0));
+        assert_eq!(std::fs::read_to_string(&lista).unwrap(), de_oficina);
+
+        // Sin lista, o con una lista de otro servidor: ni se pregunta a la red.
+        let nunca = |_: &str| -> bool { panic!("no hay nada de este servidor: no se toca la red") };
+        assert_eq!(red_lista(Some(d.join("no-esta.conf")), true, cerrado, &nunca).unwrap().red, None);
+        std::fs::write(&lista, "C6.6.6.6:6.6.6.6:camilo:k1:C:QPSQL\n").unwrap();
+        assert_eq!(red_lista(Some(lista.clone()), true, cerrado, &nunca).unwrap().red, None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Con una COPIA de la lista de este equipo: como si se fuera a casa y volviera. La de verdad no se
+    /// toca, y no se imprime ninguna línea (llevan la clave).
+    #[test]
+    #[ignore]
+    fn ida_y_vuelta_con_una_copia_de_la_lista_de_este_equipo() {
+        let real = std::fs::read_to_string(ruta_lista().expect("ruta")).expect("este equipo no tiene lista de Resolve");
+        let d = carpeta("copia-real");
+        let lista = d.join("dblist.conf");
+        std::fs::write(&lista, &real).unwrap();
+        let en_casa = |ip: &str| ip == ZT;
+        let en_oficina = |ip: &str| ip == OF || ip == ZT;
+        let antes = red_lista(Some(lista.clone()), false, cerrado, &en_oficina).unwrap();
+        let ida = red_lista(Some(lista.clone()), true, cerrado, &en_casa).unwrap();
+        println!("en la oficina: {} por oficina, {} por ZeroTier", antes.oficina, antes.zerotier);
+        println!("en casa: {} cambiaron; quedan {} por oficina, {} por ZeroTier", ida.cambiadas.len(), ida.oficina, ida.zerotier);
+        assert_eq!((ida.oficina, ida.zerotier), (0, antes.oficina + antes.zerotier));
+        let lineas = |t: &str| t.lines().count();
+        assert_eq!(lineas(&std::fs::read_to_string(&lista).unwrap()), lineas(&real), "ni una línea de más ni de menos");
+        let vuelta = red_lista(Some(lista.clone()), true, cerrado, &en_oficina).unwrap();
+        println!("de vuelta: {} cambiaron; quedan {} por oficina", vuelta.cambiadas.len(), vuelta.oficina);
+        if antes.zerotier == 0 {
+            assert!(std::fs::read_to_string(&lista).unwrap() == real, "de vuelta en la oficina, la lista es idéntica a la de verdad");
+            println!("la copia quedó idéntica a la lista de verdad");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// En un equipo de verdad: por dónde llega al servidor y cuántas bibliotecas cambiaría. No escribe.
+    #[test]
+    #[ignore]
+    fn en_este_equipo_sin_escribir() {
+        let t0 = std::time::Instant::now();
+        let r = red_lista(ruta_lista(), false, resolve_abierto, &llega).unwrap();
+        println!("{r:?} en {:?}", t0.elapsed());
+        println!("oficina responde: {}, zerotier responde: {}, otra dirección: {}", llega(OF), llega(ZT), llega("192.168.0.40"));
     }
 }

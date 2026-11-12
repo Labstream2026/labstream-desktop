@@ -90,6 +90,16 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   vuelta olvida solo las vistas de **carpetas de red** que ya estaban como vídeo, fotos o música
   (`src-tauri/src/vistas_red.rs`). Cuenta del todo desde el siguiente inicio de sesión; la app no
   reinicia el Explorador. Prueba contra una copia del registro: `scripts/probar-vistas-red.ps1`.
+- **Resolve entra por la oficina o por ZeroTier, según dónde esté el equipo** (v1.39.0, Windows y
+  Mac): `resolve_lista_red` mira por dónde llega el equipo al servidor de las bibliotecas (le hace a
+  PostgreSQL la pregunta con la que empieza cualquier conexión, sin usuario ni clave) y deja las
+  líneas de `dblist.conf` con esa dirección: la de la oficina siempre que responda (es la rápida,
+  aunque ZeroTier también responda), la de ZeroTier si es la única, y nada si no responde ninguna.
+  Las dos direcciones están en la app (`SERVIDOR` en `src-tauri/src/resolve_lista.rs`), no las manda
+  la página: una clave no puede acabar apuntando a otro servidor. Solo con Resolve cerrado y con
+  copia antes. Lo llama la página del OS en cada carga y desde el botón «Comprobar ahora» de la
+  pestaña Resolve. Prueba con una copia de la lista de verdad:
+  `cargo test --lib ida_y_vuelta -- --ignored --nocapture`.
 - **Las bibliotecas de Resolve nuevas llegan solas** (v1.30.0, Windows y Mac): la página del
   OS mira cada 15 min la lista de bibliotecas de Resolve del equipo (`dblist.conf`, en
   `%APPDATA%\Blackmagic Design\DaVinci Resolve\Preferences` o en

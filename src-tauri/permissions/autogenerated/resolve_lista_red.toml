@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-resolve-lista-red"
+description = "Enables the resolve_lista_red command without any pre-configured scope."
+commands.allow = ["resolve_lista_red"]
+
+[[permission]]
+identifier = "deny-resolve-lista-red"
+description = "Denies the resolve_lista_red command without any pre-configured scope."
+commands.deny = ["resolve_lista_red"]

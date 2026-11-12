@@ -29,6 +29,7 @@
     "allow-resolve-lista",
     "allow-resolve-lista-agregar",
     "allow-resolve-lista-renombrar",
+    "allow-resolve-lista-red",
     "allow-carpetas-os-estado"
   ]
 }
