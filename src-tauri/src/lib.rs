@@ -42,6 +42,7 @@ mod ia;
 mod resolve_lista;
 mod carpeta;
 mod carpetas_os;
+mod vistas_red;
 mod actualizar;
 
 use std::{
@@ -2825,6 +2826,8 @@ pub fn run() {
 
             // Los colores de las carpetas del OS en el Explorador (Windows), solos y sin ventanas.
             carpetas_os::iniciar(app.handle());
+            // Que el Explorador abra las carpetas (las del NAS) como «Elementos generales» (Windows).
+            vistas_red::iniciar(app.handle());
 
             // Salud: medición de recursos cada minuto y vigilante del hilo principal.
             salud::iniciar(app.handle(), recursos, dormir_ocultas_ya);

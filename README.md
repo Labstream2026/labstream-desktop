@@ -82,6 +82,14 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   en la primera clave con un nombre de 20 letras o más (así falló la 1.36.0). Prueba de punta a punta
   en un Windows de verdad, con una IP de documentación:
   `PD=<carpeta de prueba> cargo test --lib carpetas_os -- --ignored --nocapture`.
+- **Las carpetas se abren como «Elementos generales»** (v1.38.0, Windows): el Explorador ya no
+  adivina el tipo de cada carpeta mirando su contenido; las de material grabado del NAS ya no se
+  abren como «Vídeos» (que lee cada clip por la red para sacar duración y fecha). Una vez por
+  computador pone `Bags\AllFolders\Shell\FolderType = NotSpecified` (HKCU, sin administrador; si ya
+  había un valor o alguien lo quita, no lo vuelve a poner: marca `vistas-generales.txt`), y en cada
+  vuelta olvida solo las vistas de **carpetas de red** que ya estaban como vídeo, fotos o música
+  (`src-tauri/src/vistas_red.rs`). Cuenta del todo desde el siguiente inicio de sesión; la app no
+  reinicia el Explorador. Prueba contra una copia del registro: `scripts/probar-vistas-red.ps1`.
 - **Las bibliotecas de Resolve nuevas llegan solas** (v1.30.0, Windows y Mac): la página del
   OS mira cada 15 min la lista de bibliotecas de Resolve del equipo (`dblist.conf`, en
   `%APPDATA%\Blackmagic Design\DaVinci Resolve\Preferences` o en
