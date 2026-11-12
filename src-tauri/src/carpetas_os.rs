@@ -350,6 +350,14 @@ fn vuelta_con(ips: &[&str], program_data: &Path, marca: Option<&Path>) -> Result
         cambios.push(format!("{nuevas} NAS marcados como red local"));
     }
 
+    // 1b. Que el Explorador guarde en el propio computador los desktop.ini de las carpetas de red
+    // (11-nov-2026). Sin esto, cada vez que se abre una unidad del NAS el Explorador le pide al NAS el
+    // desktop.ini de CADA carpeta pintada (10 ms en la oficina, 30-100 ms por ZeroTier). Es la
+    // directiva documentada por Microsoft (KB 898612). Va en HKCU: no pide administrador.
+    if poner_cache_desktop_ini() {
+        cambios.push("caché de desktop.ini de red encendida".into());
+    }
+
     // 2. Los iconos en ProgramData.
     let dir = carpeta_iconos(program_data);
     let falta = !dir.join(TESTIGO).exists();
@@ -380,6 +388,21 @@ fn vuelta_con(ips: &[&str], program_data: &Path, marca: Option<&Path>) -> Result
     }
     refrescar_iconos();
     Ok(Some(cambios.join(", ")))
+}
+
+/// Pone `UseDesktopIniCache=1` en las directivas del Explorador del usuario. true si lo cambió.
+#[cfg(windows)]
+fn poner_cache_desktop_ini() -> bool {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    const CLAVE: &str = r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer";
+    let Ok((k, _)) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(CLAVE) else {
+        return false;
+    };
+    if k.get_value::<u32, _>("UseDesktopIniCache").ok() == Some(1) {
+        return false;
+    }
+    k.set_value("UseDesktopIniCache", &1u32).is_ok()
 }
 
 /// ie4uinit.exe es de Windows y está firmado por Microsoft: es lo único que se lanza, sin ventana.
