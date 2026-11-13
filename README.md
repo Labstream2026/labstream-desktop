@@ -95,6 +95,13 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   le vuelve a poner); lo manda el enlace «Volver a ponerlas» del botón «Agregar bibliotecas» de la
   pestaña Resolve del OS, que es pedirlo a propósito. Mismas reglas: Resolve cerrado, copia antes y
   usuario, clave y dirección de una línea que ya está.
+- **El Resolve de la App Store, y «no hay lista» dice por qué** (v1.40.3): en Mac también se busca la
+  lista dentro del contenedor del Resolve de la App Store (`~/Library/Containers/
+  com.blackmagic-design.DaVinciResolveAppStore/Data/Library/Preferences`, y el del gratuito) y en
+  `/Library/Preferences/Blackmagic Design`. macOS pide permiso para leer datos de otra app: si no lo
+  tiene, la app lo dice («macOS no le ha dado permiso… Acceso total al disco») en vez de «no tiene
+  bibliotecas». `por_que_no_hay_lista` distingue tres casos: sin permiso, preferencias sin lista, y sin
+  Resolve. El diagnóstico enseña qué hay en cada carpeta donde miró (solo nombres de archivo).
 - **La lista de Resolve en Mac, donde está de verdad, y un diagnóstico** (v1.40.2): en Mac la app
   buscaba `dblist.conf` en `~/Library/Application Support/…/Preferences`, pero las preferencias de
   Resolve viven en `~/Library/Preferences/Blackmagic Design/DaVinci Resolve`. Resultado: en los Mac

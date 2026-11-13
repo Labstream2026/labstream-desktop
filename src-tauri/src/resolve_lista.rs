@@ -188,19 +188,27 @@ fn donde_buscar() -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
     #[cfg(target_os = "macos")]
     {
         let h = PathBuf::from(std::env::var_os("HOME")?);
+        // El Resolve de la App Store (Studio y el gratuito) guarda lo suyo dentro de su contenedor, no en
+        // las preferencias de la persona (1.40.3). macOS pide permiso para leer datos de otra app.
+        let tienda = |app: &str| h.join(format!("Library/Containers/com.blackmagic-design.{app}/Data/Library"));
+        let (studio, gratis) = (tienda("DaVinciResolveAppStore"), tienda("DaVinciResolveLite"));
         Some((
             vec![
                 h.join("Library/Preferences/Blackmagic Design/DaVinci Resolve/dblist.conf"),
+                studio.join("Preferences/dblist.conf"),
+                studio.join("Preferences/Blackmagic Design/DaVinci Resolve/dblist.conf"),
+                gratis.join("Preferences/dblist.conf"),
+                gratis.join("Preferences/Blackmagic Design/DaVinci Resolve/dblist.conf"),
+                PathBuf::from("/Library/Preferences/Blackmagic Design/DaVinci Resolve/dblist.conf"),
                 h.join("Library/Application Support/Blackmagic Design/DaVinci Resolve/Preferences/dblist.conf"),
-                h.join("Library/Application Support/Blackmagic Design/DaVinci Resolve/dblist.conf"),
             ],
             vec![
                 h.join("Library/Preferences/Blackmagic Design"),
                 h.join("Library/Application Support/Blackmagic Design"),
+                PathBuf::from("/Library/Preferences/Blackmagic Design"),
                 PathBuf::from("/Library/Application Support/Blackmagic Design"),
-                // El Resolve de la App Store guarda lo suyo dentro de su contenedor.
-                h.join("Library/Containers/com.blackmagic-design.DaVinciResolveAppStore/Data/Library"),
-                h.join("Library/Containers/com.blackmagic-design.DaVinciResolveLite/Data/Library"),
+                studio,
+                gratis,
             ],
         ))
     }
@@ -258,6 +266,54 @@ fn ruta_lista() -> Option<PathBuf> {
     }
     let halladas: Vec<PathBuf> = raices.iter().flat_map(|r| buscar_lista(r, FONDO_DE_BUSQUEDA)).collect();
     elegir_lista(&halladas).or_else(|| fijas.into_iter().next())
+}
+
+/// Cómo está una carpeta donde Resolve puede guardar su lista (1.40.3): para decir por qué no aparece.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Carpeta {
+    NoExiste,
+    /// macOS no deja leerla: es de otra app (el Resolve de la App Store) y falta el permiso.
+    SinPermiso,
+    /// Está, con estos archivos (solo los nombres).
+    Esta(Vec<String>),
+    Otro(String),
+}
+
+pub(crate) fn mirar_carpeta(c: &Path) -> Carpeta {
+    match std::fs::read_dir(c) {
+        Ok(rd) => {
+            let mut nombres: Vec<String> = rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+            nombres.sort();
+            Carpeta::Esta(nombres)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Carpeta::NoExiste,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Carpeta::SinPermiso,
+        Err(e) => Carpeta::Otro(e.to_string()),
+    }
+}
+
+/// Las carpetas de las candidatas, sin repetir y en su orden.
+fn carpetas_de(candidatas: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for c in candidatas.iter().filter_map(|p| p.parent()) {
+        if !out.iter().any(|x| x == c) {
+            out.push(c.to_path_buf());
+        }
+    }
+    out
+}
+
+const DAR_PERMISO: &str = "Ajustes del Sistema › Privacidad y seguridad › Acceso total al disco › activa Labstream OS, y vuelve a abrir la app";
+
+/// Por qué no hay lista, según cómo están las carpetas donde podría estar.
+pub(crate) fn por_que_no_hay_lista(carpetas: &[Carpeta]) -> String {
+    if carpetas.contains(&Carpeta::SinPermiso) {
+        return format!("No puedo leer la lista de bibliotecas de Resolve en este equipo: macOS no le ha dado permiso a Labstream OS para leer los datos de Resolve. Dáselo en {DAR_PERMISO}.");
+    }
+    if carpetas.iter().any(|c| matches!(c, Carpeta::Esta(_))) {
+        return "Resolve no tiene bibliotecas de red en este equipo: están sus preferencias, pero no su lista (dblist.conf). Conecta una biblioteca de red a mano una vez en Resolve y las demás llegan solas.".into();
+    }
+    "Resolve no tiene bibliotecas de red en este equipo: no encontré su lista (dblist.conf) ni sus preferencias. O no está instalado, o no se ha abierto nunca con esta cuenta.".into()
 }
 
 /// Una ruta para leerla: la carpeta de la persona se dice «~».
@@ -437,15 +493,12 @@ pub struct Estado {
 
 const SIN_BIBLIOTECAS: &str = "Resolve no tiene bibliotecas de red en este equipo.";
 
-/// «No tiene bibliotecas» con lo que se miró: en un Mac, si al menos están las preferencias de Resolve
-/// (está instalado y se ha abierto) o ni eso. Se lee en la lista de equipos de la pestaña Resolve.
+/// «No tiene bibliotecas» con lo que se miró: si macOS no deja leer los datos de Resolve, si están sus
+/// preferencias pero no la lista, o ni eso. Lo dice el botón «Agregar bibliotecas» y la lista de equipos.
 fn sin_bibliotecas_con_detalle() -> String {
     let Some((fijas, _)) = donde_buscar() else { return SIN_BIBLIOTECAS.into() };
-    let carpeta = fijas.first().and_then(|p| p.parent()).is_some_and(|d| d.is_dir());
-    format!(
-        "Resolve no tiene bibliotecas de red en este equipo: no encontré su lista (dblist.conf). {}",
-        if carpeta { "Las preferencias de Resolve sí están: añade una biblioteca de red a mano una vez y las demás llegan solas." } else { "Tampoco están las preferencias de Resolve: o no está instalado o no se ha abierto nunca con esta cuenta." }
-    )
+    let estados: Vec<Carpeta> = carpetas_de(&fijas).iter().map(|c| mirar_carpeta(c)).collect();
+    por_que_no_hay_lista(&estados)
 }
 
 fn sin_lista(motivo: &str) -> Estado {
@@ -461,7 +514,7 @@ fn mirar(ruta: Option<PathBuf>, vistas_en: Option<&Path>, abierto: fn() -> bool)
     };
     let lineas: Vec<Linea> = texto.lines().filter_map(leer_linea).collect();
     if lineas.is_empty() {
-        return sin_lista("La lista de Resolve no tiene ninguna biblioteca de red de la que copiar el acceso.");
+        return sin_lista("La lista de Resolve de este equipo no tiene ninguna biblioteca de red de la que copiar el acceso (usuario y clave). Conecta una a mano una vez en Resolve y las demás llegan solas.");
     }
     let nombres: Vec<String> = lineas.iter().map(|l| l.base.clone()).collect::<BTreeSet<_>>().into_iter().collect();
     // Lo que está hoy en la lista queda «visto»: si mañana alguien la quita, no se vuelve a poner.
@@ -784,8 +837,24 @@ fn diagnostico(modo: Modo, version: &str, abierto: fn() -> bool, probar: &dyn Fn
             }
         }
         None => {
-            d.push("Lista de Resolve: no la encontré (dblist.conf). Busqué en:".into());
-            d.extend(fijas.iter().map(|f| format!("  {}", legible(f))));
+            d.push("Lista de Resolve: no la encontré (dblist.conf). Miré en:".into());
+            let mut sin_permiso = false;
+            for c in carpetas_de(&fijas) {
+                let como = match mirar_carpeta(&c) {
+                    Carpeta::NoExiste => "no existe".to_string(),
+                    Carpeta::SinPermiso => {
+                        sin_permiso = true;
+                        "macOS no deja leerla".to_string()
+                    }
+                    Carpeta::Esta(n) if n.is_empty() => "está, vacía".to_string(),
+                    Carpeta::Esta(n) => format!("está, con {}: {}{}", n.len(), n.iter().take(12).cloned().collect::<Vec<_>>().join(", "), if n.len() > 12 { "…" } else { "" }),
+                    Carpeta::Otro(e) => format!("no se puede leer ({e})"),
+                };
+                d.push(format!("  {}: {como}", legible(&c)));
+            }
+            if sin_permiso {
+                d.push(format!("Para dar el permiso: {DAR_PERMISO}."));
+            }
         }
     }
     d.push(format!("Resolve: {}", if abierto() { "abierto (la lista solo se cambia con Resolve cerrado)" } else { "cerrado" }));
@@ -1167,6 +1236,24 @@ mod pruebas {
         std::fs::write(&fijas[0], "Local Database:C/x:y:z:w:DISK\n").unwrap();
         std::fs::write(&fijas[1], format!("A{OF}:{OF}:camilo:k1:A:QPSQL\n")).unwrap();
         assert_eq!(elegir_lista(&fijas), Some(fijas[1].clone()));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn sin_lista_dice_por_que_permiso_de_macos_sin_lista_o_sin_resolve() {
+        let d = carpeta("porque");
+        let prefs = d.join("Preferences");
+        std::fs::create_dir_all(&prefs).unwrap();
+        std::fs::write(prefs.join("config.dat"), "x").unwrap();
+        std::fs::write(prefs.join("a.xml"), "x").unwrap();
+        assert_eq!(mirar_carpeta(&prefs), Carpeta::Esta(vec!["a.xml".to_string(), "config.dat".to_string()]));
+        assert_eq!(mirar_carpeta(&d.join("no-esta")), Carpeta::NoExiste);
+        assert_eq!(carpetas_de(&[prefs.join("dblist.conf"), prefs.join("otra.conf"), d.join("x/dblist.conf")]), vec![prefs.clone(), d.join("x")]);
+
+        // El permiso manda: aunque otra carpeta esté, lo que hay que arreglar es eso.
+        assert!(por_que_no_hay_lista(&[Carpeta::Esta(vec![]), Carpeta::SinPermiso]).contains("Acceso total al disco"));
+        assert!(por_que_no_hay_lista(&[Carpeta::NoExiste, Carpeta::Esta(vec![])]).contains("están sus preferencias, pero no su lista"));
+        assert!(por_que_no_hay_lista(&[Carpeta::NoExiste, Carpeta::NoExiste]).contains("O no está instalado"));
         let _ = std::fs::remove_dir_all(&d);
     }
 
