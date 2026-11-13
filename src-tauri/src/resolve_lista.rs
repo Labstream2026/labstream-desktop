@@ -497,6 +497,10 @@ pub struct Paso {
     rol: String,
     ip: String,
     bibliotecas: Vec<String>,
+    /// A petición (1.40.3, «Volver a ponerlas» de la pestaña Resolve): también las que ya se vieron
+    /// y alguien quitó a mano de este Resolve. La vuelta automática nunca lo manda.
+    #[serde(default)]
+    forzar: bool,
 }
 
 #[derive(Serialize)]
@@ -536,7 +540,7 @@ fn agregar(ruta: Option<PathBuf>, vistas_en: Option<&Path>, paso: Paso, abierto:
     let ya: BTreeSet<&str> = lineas.iter().map(|l| l.base.as_str()).collect();
     let mut nuevas: Vec<String> = Vec::new();
     for b in paso.bibliotecas.iter().take(50) {
-        if nombre_valido(b) && !ya.contains(b.as_str()) && !v.vistas.contains(b) && !nuevas.contains(b) {
+        if nombre_valido(b) && !ya.contains(b.as_str()) && (paso.forzar || !v.vistas.contains(b)) && !nuevas.contains(b) {
             nuevas.push(b.clone());
         }
     }
@@ -1108,7 +1112,7 @@ mod pruebas {
         let d = carpeta("agregar");
         let (lista, vistas) = (d.join("dblist.conf"), d.join("vistas.json"));
         std::fs::write(&lista, LISTA).unwrap();
-        let paso = |b: &[&str]| Paso { rol: "camilo".into(), ip: "192.168.0.22".into(), bibliotecas: b.iter().map(|s| s.to_string()).collect() };
+        let paso = |b: &[&str]| Paso { rol: "camilo".into(), ip: "192.168.0.22".into(), bibliotecas: b.iter().map(|s| s.to_string()).collect(), forzar: false };
 
         let r = agregar(Some(lista.clone()), Some(&vistas), paso(&["Camilo_Ortega", "Nueva", "a:b", "Nueva"]), cerrado).unwrap();
         assert_eq!(r.agregadas, vec!["Nueva".to_string()]);
@@ -1121,10 +1125,20 @@ mod pruebas {
         assert!(agregar(Some(lista.clone()), Some(&vistas), paso(&["Nueva"]), cerrado).unwrap().agregadas.is_empty());
         std::fs::write(&lista, LISTA).unwrap();
         assert!(agregar(Some(lista.clone()), Some(&vistas), paso(&["Nueva"]), cerrado).unwrap().agregadas.is_empty());
+        // Salvo que se pida (1.40.3, «Volver a ponerlas»): entonces sí vuelve, una sola vez.
+        let pedida = Paso { forzar: true, ..paso(&["Nueva", "Camilo_Ortega"]) };
+        assert_eq!(agregar(Some(lista.clone()), Some(&vistas), pedida, cerrado).unwrap().agregadas, vec!["Nueva".to_string()]);
+        assert!(std::fs::read_to_string(&lista).unwrap().ends_with("Nueva192.168.0.22:192.168.0.22:camilo:k1:Nueva:QPSQL\r\n"));
+        let otra_vez = Paso { forzar: true, ..paso(&["Nueva"]) };
+        assert!(agregar(Some(lista.clone()), Some(&vistas), otra_vez, cerrado).unwrap().agregadas.is_empty());
+        std::fs::write(&lista, LISTA).unwrap();
+        // La página manda `forzar` solo al pedirlo; sin el campo es una vuelta normal.
+        assert!(!serde_json::from_str::<Paso>(r#"{"rol":"camilo","ip":"1","bibliotecas":[]}"#).unwrap().forzar);
+        assert!(serde_json::from_str::<Paso>(r#"{"rol":"camilo","ip":"1","bibliotecas":[],"forzar":true}"#).unwrap().forzar);
 
         // Con Resolve abierto, o con un usuario o dirección que no están en la lista: error y sin tocar.
         assert!(agregar(Some(lista.clone()), Some(&vistas), paso(&["Otra"]), abierto).is_err());
-        let ajeno = Paso { rol: "camilo".into(), ip: "6.6.6.6".into(), bibliotecas: vec!["Otra".into()] };
+        let ajeno = Paso { rol: "camilo".into(), ip: "6.6.6.6".into(), bibliotecas: vec!["Otra".into()], forzar: false };
         assert!(agregar(Some(lista.clone()), Some(&vistas), ajeno, cerrado).is_err());
         assert_eq!(std::fs::read_to_string(&lista).unwrap(), LISTA);
         let _ = std::fs::remove_dir_all(&d);

@@ -90,6 +90,11 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   vuelta olvida solo las vistas de **carpetas de red** que ya estaban como vídeo, fotos o música
   (`src-tauri/src/vistas_red.rs`). Cuenta del todo desde el siguiente inicio de sesión; la app no
   reinicia el Explorador. Prueba contra una copia del registro: `scripts/probar-vistas-red.ps1`.
+- **Volver a poner una biblioteca que se quitó a mano** (v1.40.3): `resolve_lista_agregar` acepta
+  `forzar` en el paso. La vuelta automática nunca lo manda (lo que alguien quita de su Resolve no se
+  le vuelve a poner); lo manda el enlace «Volver a ponerlas» del botón «Agregar bibliotecas» de la
+  pestaña Resolve del OS, que es pedirlo a propósito. Mismas reglas: Resolve cerrado, copia antes y
+  usuario, clave y dirección de una línea que ya está.
 - **La lista de Resolve en Mac, donde está de verdad, y un diagnóstico** (v1.40.2): en Mac la app
   buscaba `dblist.conf` en `~/Library/Application Support/…/Preferences`, pero las preferencias de
   Resolve viven en `~/Library/Preferences/Blackmagic Design/DaVinci Resolve`. Resultado: en los Mac
