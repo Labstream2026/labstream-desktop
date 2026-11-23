@@ -25,7 +25,7 @@
          diferencia es sutil a propósito; quien la marca de verdad es el borde inferior, que la
          pestaña activa tapa con su propio fondo. */
       :root {
-        --bg: #f4f5f7;          /* franja: casi blanca, del tono de la app en claro */
+        --bg: #dde1e7;          /* franja: más oscura que el contenido, para que la abierta destaque (1.42) */
         --fg: #45474a;
         --muted: #5f6368;
         --tab-active-bg: #ffffff;  /* mismo fondo que la app → pestaña fundida con el contenido */
@@ -278,15 +278,12 @@
       .tab .favicon svg { width: 15px; height: 15px; display: block; }
       .tab .titulo .detalle { color: var(--muted); font-weight: 400; }
       #tabs .tab.pagina .titulo .detalle { color: color-mix(in srgb, var(--tp-fg) 55%, transparent); }
-      /* La franja del CLIENTE: su color de marca, arriba, fina. En la activa cruza el borde superior. */
-      .tab .franja { position: absolute; left: 10px; right: 10px; top: 0; height: 2px; border-radius: 0 0 2px 2px; background: var(--cl); opacity: 0.9; }
-      .tab.active .franja { left: 12px; right: 12px; height: 2.5px; }
       /* El chip del cliente va en el sitio del icono cuando la ficha es de un proyecto o un cliente. */
       .tab .chip { width: 16px; height: 16px; border-radius: 4px; display: grid; place-items: center; font-size: 8.5px; font-weight: 700; letter-spacing: 0.02em; color: #fff; background: var(--cl); flex: 0 0 auto; }
       /* Estado en vivo: punto azul = cambios sin guardar; aro = trabajando. */
       .tab .estado { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: #378ef0; box-shadow: 0 0 0 2px rgba(55, 142, 240, 0.25); }
       .tab .estado.trabajando { width: 10px; height: 10px; background: none; box-shadow: none; border: 1.8px solid var(--sep); border-top-color: var(--accent); animation: giro 0.9s linear infinite; }
-      #tabs.compactas .tab .estado, #tabs.compactas .tab .franja { display: none; }
+      #tabs.compactas .tab .estado { display: none; }
       #tabs.compactas .tab { padding: 0 6px; justify-content: center; }
       #tabs.compactas .tab .titulo { display: none; }
       #tabs.compactas .tab:not(.active) .cerrar { display: none; }
@@ -411,6 +408,28 @@
       #tabs .tab:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
       #tabs .tab.active .titulo { color: inherit; }
       #tabs .tab .cerrar { flex-shrink: 0; width: 22px; height: 22px; }
+      /* ── CADA PESTAÑA CON SU COLOR, y la abierta FUNDIDA (1.42, 23-nov-2026) ─────────────────
+         Munka: «utilizar colores para que sea más fácil navegar y diferenciar la pestaña que está
+         abierta y cuál no». La franja y la abierta eran casi del mismo blanco, y las de detrás
+         también. Ahora la franja es más oscura que el contenido, cada pestaña lleva su color
+         (--cl, ver colorDe: el del menú, el del cliente o el de su tipo de página) y la abierta es
+         la única del color del contenido, con una franja gruesa arriba. El texto nunca va del color
+         del cliente: se lee igual con un gris que con un amarillo.
+         Una página oscura (el editor de fotos) sigue siendo de su color: manda --tp, sin teñir. */
+      :root.con-superficie.claro { --bg: color-mix(in srgb, var(--superficie) 86%, #1e293b); }
+      :root.con-superficie.oscuro { --bg: color-mix(in srgb, var(--superficie) 55%, #000000); }
+      #tabs .tab { --clf: var(--cl); }
+      :root.oscuro #tabs .tab { --clf: color-mix(in srgb, var(--cl) 80%, #ffffff); }
+      #tabs .tab.clara:not(.active) { background: color-mix(in srgb, var(--cl) 17%, var(--bg)); color: var(--fg); box-shadow: none; --muted: color-mix(in srgb, var(--fg) 72%, var(--bg)); }
+      #tabs .tab.clara:not(.active):hover { background: color-mix(in srgb, var(--cl) 30%, var(--bg)); color: var(--tab-active-fg); }
+      :root.oscuro #tabs .tab.clara:not(.active) { background: color-mix(in srgb, var(--cl) 30%, var(--bg)); }
+      :root.oscuro #tabs .tab.clara:not(.active):hover { background: color-mix(in srgb, var(--cl) 45%, var(--bg)); }
+      #tabs .tab.clara:not(.active) .titulo .detalle { color: var(--muted); }
+      #tabs .tab.clara .favicon svg { color: color-mix(in srgb, var(--cl) 62%, var(--tab-active-fg)); }
+      #tabs .tab.active, #tabs .tab.pagina.active[data-color] { box-shadow: inset 0 4px 0 var(--clf), var(--tab-activa-sombra); }
+      #tabs .tab.active .titulo { font-weight: 700; }
+      #tabs .tab.pagina[data-color]:not(.clara):not(.active) { box-shadow: inset 0 3px 0 var(--clf); }
+      .tab .chip { color: var(--clo, #fff); }
       @media (prefers-reduced-motion: reduce) { .tab { transition: none; } }
     </style>
   </head>
@@ -636,6 +655,23 @@
         if (c) { raiz.style.setProperty("--superficie", c); raiz.style.setProperty("--superficie-fg", esClaro(c) ? "#202124" : "#ececec"); }
         else { raiz.style.removeProperty("--superficie"); raiz.style.removeProperty("--superficie-fg"); }
       }
+      // ── De qué color es una pestaña (1.42) ── Por orden: el que se eligió con el menú (clic derecho
+      // ▸ Color), el de su cliente y, si la página no es de ningún cliente, el de su tipo.
+      const COLOR_MENU = { gris: "#5f6368", azul: "#1a73e8", rojo: "#d93025", amarillo: "#f9ab00", verde: "#1e8e3e", rosa: "#d01884", morado: "#9334e6", cian: "#007b83", naranja: "#fa903e" };
+      const COLOR_TIPO = { inicio: "#f47a20", proyecto: "#475569", fotos: "#0369a1", edicion: "#0369a1", portada: "#a21caf", video: "#6d28d9", cliente: "#475569", chat: "#7c3aed", notas: "#b45309", recordatorios: "#be123c", calendario: "#c2410c", documento: "#15803d", archivos: "#0e7490", ajustes: "#475569", tareas: "#1d4ed8", entregas: "#be123c" };
+      function colorDe(t) {
+        if (t.color && COLOR_MENU[t.color]) return COLOR_MENU[t.color];
+        const f = nombreDe(t);
+        const c = f.cliente && f.cliente.color;
+        if (/^#[0-9a-f]{6}$/i.test(c || "")) return c;
+        return COLOR_TIPO[f.icono] || COLOR_TIPO.inicio;
+      }
+      // ¿Se tiñe? Todas menos las que piden un color de página distinto del de la app (el editor, oscuro
+      // sobre una app clara): esas ya se reconocen por el suyo.
+      function esClara(t, oscuraLaApp) {
+        const c = colorDeTab(t);
+        return !c || esClaro(c) !== !!oscuraLaApp;
+      }
       function render() {
         const foco = document.activeElement && document.activeElement.closest(".tab");
         const focoId = foco && foco.dataset.label;
@@ -668,14 +704,11 @@
           }
           el.title = (detalle ? texto + " · " + detalle : texto) + (cliente ? " — " + cliente.nombre : "");
 
-          // El cliente: su color en la franja de arriba y, de proyecto o cliente, su chip de iniciales.
-          const colorCliente = cliente && /^#[0-9a-f]{6}$/i.test(cliente.color || "") ? cliente.color : cliente ? "#6b7280" : "";
-          if (colorCliente) {
-            el.style.setProperty("--cl", colorCliente);
-            const franja = document.createElement("span");
-            franja.className = "franja";
-            el.appendChild(franja);
-          }
+          // Su color (colorDe): tiñe la de detrás, hace la franja de la abierta y el chip del cliente.
+          const color = colorDe(t);
+          el.style.setProperty("--cl", color);
+          el.style.setProperty("--clo", esClaro(color) ? "#202124" : "#ffffff");
+          if (esClara(t, estado.dark)) el.classList.add("clara");
           const fav = document.createElement("span");
           fav.className = "favicon" + (t.loading ? " cargando" : "");
           if (!t.loading) {

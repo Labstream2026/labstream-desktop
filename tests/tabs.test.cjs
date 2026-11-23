@@ -81,3 +81,27 @@ test('window.open mantiene sus caminos de siempre',()=>{
  assert.equal(s.open('/docs/file/1','_blank'),null);assert.deepEqual(plano(s.llamadas[1]),['ls-new-tab',{url:'https://os.labstreamsas.com/docs/file/1'}]);
  assert.equal(s.open('blob:https://os.labstreamsas.com/u'),'nativa');assert.equal(s.nativas.length,1);assert.equal(s.llamadas.length,2);
 });
+// ── El color de cada pestaña (1.42) ──
+const colores=html.slice(html.indexOf('      function esClaro('),html.indexOf('      function pintarBarra()'))+html.slice(html.indexOf('      const COLOR_MENU'),html.indexOf('      function render()'));
+function colorear(t,oscura=false){
+ const ctx={t,oscura,nombreDe:x=>({icono:(x.ficha&&x.ficha.icono)||'documento',cliente:(x.ficha&&x.ficha.cliente)||null})};
+ return plano(vm.runInNewContext(colores+';({color:colorDe(t),clara:esClara(t,oscura)})',ctx));
+}
+test('el color de la pestaña: el del menú, si no el del cliente, si no el de su tipo',()=>{
+ const cliente={nombre:'Skincenter',color:'#0d9488'};
+ assert.equal(colorear({color:'verde',ficha:{icono:'proyecto',cliente}}).color,'#1e8e3e');
+ assert.equal(colorear({ficha:{icono:'proyecto',cliente}}).color,'#0d9488');
+ assert.equal(colorear({ficha:{icono:'proyecto',cliente:{nombre:'Sin color'}}}).color,'#475569');
+ assert.equal(colorear({color:'inventado'}).color,'#15803d');
+});
+test('todo icono que la barra sabe pintar tiene su color',()=>{
+ const iconos=vm.runInNewContext(html.slice(html.indexOf('      const ICONOS = {'),html.indexOf('      function iconoSvg('))+';Object.keys(ICONOS)',{});
+ const tipos=vm.runInNewContext(colores+';COLOR_TIPO',{});
+ for(const i of iconos)assert.match(tipos[i]||'',/^#[0-9a-f]{6}$/,i);
+});
+test('el editor oscuro sobre una app clara conserva su color; lo demás se tiñe',()=>{
+ assert.equal(colorear({pagina:'#ffffff'}).clara,true);
+ assert.equal(colorear({}).clara,true);
+ assert.equal(colorear({pagina:'#262626'}).clara,false);
+ assert.equal(colorear({pagina:'#18181b'},true).clara,true);
+});

@@ -108,6 +108,11 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   le vuelve a poner); lo manda el enlace «Volver a ponerlas» del botón «Agregar bibliotecas» de la
   pestaña Resolve del OS, que es pedirlo a propósito. Mismas reglas: Resolve cerrado, copia antes y
   usuario, clave y dirección de una línea que ya está.
+- **Cada pestaña con su color, y la abierta fundida** (v1.42.0): la franja es más oscura que el
+  contenido y cada pestaña lleva su color: el que se eligió con el menú, si no el de su cliente, si
+  no el de su tipo de página (`colorDe` en `dist/index.html`). La abierta es la única del color del
+  contenido, con una franja gruesa arriba. Una página con color propio (el editor de fotos, oscuro
+  sobre una app clara) conserva el suyo. El color del cliente llega desde labstream-os (`lib/pestana`).
 - **El Resolve de la App Store, y «no hay lista» dice por qué** (v1.40.3): en Mac también se busca la
   lista dentro del contenedor del Resolve de la App Store (`~/Library/Containers/
   com.blackmagic-design.DaVinciResolveAppStore/Data/Library/Preferences`, y el del gratuito) y en
