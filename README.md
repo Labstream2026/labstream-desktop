@@ -90,6 +90,19 @@ NAS. Esto le da al equipo un cliente nativo de verdad en Windows y Mac:
   vuelta olvida solo las vistas de **carpetas de red** que ya estaban como vídeo, fotos o música
   (`src-tauri/src/vistas_red.rs`). Cuenta del todo desde el siguiente inicio de sesión; la app no
   reinicia el Explorador. Prueba contra una copia del registro: `scripts/probar-vistas-red.ps1`.
+- **Conectar este equipo a Resolve: la primera biblioteca** (v1.41.0): las bibliotecas nuevas llegan
+  solas copiando el acceso de una que ya esté, así que un equipo sin ninguna de red no recibía nada y
+  la primera se conectaba a mano en el Project Manager de Resolve. El panel del NAS no guarda las
+  claves (PostgreSQL solo tiene su huella): nadie puede mandarla. `resolve_lista_conectar` recibe el
+  usuario y la clave de Resolve que la persona escribe UNA vez en el aviso del OS, comprueba la clave
+  entrando al servidor (crate `postgres`, sin TLS, como Resolve) y, solo si entra, añade al final de
+  la lista todas las bibliotecas que el OS dijo que le tocan. La clave no sale del equipo: ni al OS
+  ni a ningún archivo que no sea la lista de Resolve. La dirección la decide la app según el modo del
+  equipo (la oficina si responde; si no, ZeroTier). Solo para un usuario que el equipo aún no tiene,
+  con Resolve cerrado, copia antes, y con la lista ya existente (Resolve abierto alguna vez): no se
+  inventa una. `resolve_lista` dice `conectable` cuando la lista está y no tiene bibliotecas de red.
+  Prueba contra el servidor de verdad (un usuario inventado tiene que ser rechazado):
+  `cargo test --lib -- --ignored el_servidor_de_verdad`.
 - **Volver a poner una biblioteca que se quitó a mano** (v1.40.3): `resolve_lista_agregar` acepta
   `forzar` en el paso. La vuelta automática nunca lo manda (lo que alguien quita de su Resolve no se
   le vuelve a poner); lo manda el enlace «Volver a ponerlas» del botón «Agregar bibliotecas» de la

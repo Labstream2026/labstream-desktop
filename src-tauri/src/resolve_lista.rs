@@ -24,6 +24,11 @@
 //! `modo` (1.40, resolve-modo.json): qué hace la app con Resolve en ESTE equipo. Automático (la oficina
 //! si responde, si no ZeroTier), Local u ZeroTier elegidos a mano, o Apagado: en un equipo sin Resolve
 //! la app no mira ni toca la lista. Se elige en el menú ⋮ de la app o en la pestaña Resolve del OS.
+//!
+//! `resolve_lista_conectar` (1.41, 23-nov-2026): la PRIMERA biblioteca de un equipo. Sin ninguna de red
+//! no había de dónde copiar el acceso y se conectaba a mano en Resolve. Ahora la persona escribe su
+//! usuario y su clave de Resolve una vez, la app la comprueba contra el servidor y escribe todas sus
+//! bibliotecas. La clave sigue sin salir de este equipo: ni al OS ni a ningún otro sitio.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -489,9 +494,13 @@ pub struct Estado {
     cuentas: Vec<Cuenta>,
     nombres: Vec<String>,
     vistas: Vec<String>,
+    /// La lista está, pero sin ninguna biblioteca de red (1.41): este equipo se puede conectar con el
+    /// usuario y la clave de Resolve (`resolve_lista_conectar`). La página ofrece hacerlo.
+    conectable: bool,
 }
 
 const SIN_BIBLIOTECAS: &str = "Resolve no tiene bibliotecas de red en este equipo.";
+const SIN_RED_CONECTABLE: &str = "El Resolve de este equipo todavía no tiene ninguna biblioteca de red. Conéctalo con tu usuario y tu clave de Resolve (el OS lo ofrece dentro de esta app) y las demás llegan solas.";
 
 /// «No tiene bibliotecas» con lo que se miró: si macOS no deja leer los datos de Resolve, si están sus
 /// preferencias pero no la lista, o ni eso. Lo dice el botón «Agregar bibliotecas» y la lista de equipos.
@@ -502,7 +511,7 @@ fn sin_bibliotecas_con_detalle() -> String {
 }
 
 fn sin_lista(motivo: &str) -> Estado {
-    Estado { disponible: false, motivo: Some(motivo.into()), abierto: false, cuentas: vec![], nombres: vec![], vistas: vec![] }
+    Estado { disponible: false, motivo: Some(motivo.into()), abierto: false, cuentas: vec![], nombres: vec![], vistas: vec![], conectable: false }
 }
 
 fn mirar(ruta: Option<PathBuf>, vistas_en: Option<&Path>, abierto: fn() -> bool) -> Estado {
@@ -514,7 +523,8 @@ fn mirar(ruta: Option<PathBuf>, vistas_en: Option<&Path>, abierto: fn() -> bool)
     };
     let lineas: Vec<Linea> = texto.lines().filter_map(leer_linea).collect();
     if lineas.is_empty() {
-        return sin_lista("La lista de Resolve de este equipo no tiene ninguna biblioteca de red de la que copiar el acceso (usuario y clave). Conecta una a mano una vez en Resolve y las demás llegan solas.");
+        // La lista está y no tiene de dónde copiar el acceso: se puede conectar con usuario y clave (1.41).
+        return Estado { conectable: true, abierto: abierto(), ..sin_lista(SIN_RED_CONECTABLE) };
     }
     let nombres: Vec<String> = lineas.iter().map(|l| l.base.clone()).collect::<BTreeSet<_>>().into_iter().collect();
     // Lo que está hoy en la lista queda «visto»: si mañana alguien la quita, no se vuelve a poner.
@@ -524,7 +534,7 @@ fn mirar(ruta: Option<PathBuf>, vistas_en: Option<&Path>, abierto: fn() -> bool)
     if v.vistas.len() != antes {
         guardar_vistas(vistas_en, &v);
     }
-    Estado { disponible: true, motivo: None, abierto: abierto(), cuentas: cuentas_de(&lineas), nombres, vistas: v.vistas.into_iter().collect() }
+    Estado { disponible: true, motivo: None, abierto: abierto(), cuentas: cuentas_de(&lineas), nombres, vistas: v.vistas.into_iter().collect(), conectable: false }
 }
 
 #[tauri::command]
@@ -629,6 +639,172 @@ pub async fn resolve_lista_agregar<R: Runtime>(app: AppHandle<R>, paso: Paso) ->
     })
     .await
     .map_err(|e| format!("No pude añadir las bibliotecas: {e}"))?
+}
+
+// ── Conectar este equipo (1.41, 23-nov-2026) ─────────────────────────────────────────────────
+//
+// Munka: «dime si se agregan las bibliotecas y proyectos automáticamente al Resolve… construye lo que
+// haga falta». Faltaba la PRIMERA biblioteca: un equipo sin ninguna de red no tenía de dónde copiar
+// el acceso, y había que conectarla a mano en el Project Manager de Resolve (dirección, nombre exacto,
+// usuario y clave). El panel del NAS no guarda las claves (PostgreSQL solo tiene su huella), así que
+// nadie puede mandarla: la persona escribe su usuario y su clave de Resolve UNA vez, en la página del
+// OS dentro de esta app, y la app escribe todas sus bibliotecas.
+//   · La clave no sale de este equipo: va de la página a este comando, y de aquí a la lista de Resolve
+//     y al servidor de Resolve para comprobarla. No se guarda en ningún otro sitio ni viaja al OS.
+//   · Antes de escribir se COMPRUEBA entrando al servidor con ella: una clave mal escrita dejaría
+//     líneas que no abren, y de ellas se copiarían después las bibliotecas nuevas.
+//   · La dirección sale del modo de este equipo (la oficina si responde; si no, ZeroTier), no de la
+//     página: la clave no puede acabar apuntando a otro servidor.
+//   · Solo para un usuario que este equipo todavía no tiene: lo demás le sigue llegando solo.
+//   · Las reglas de siempre: Resolve cerrado, una copia antes y solo se AÑADE al final. Y la lista
+//     tiene que existir (Resolve abierto alguna vez): no se inventa una en un sitio supuesto.
+
+#[derive(Deserialize)]
+pub struct Conexion {
+    rol: String,
+    clave: String,
+    bibliotecas: Vec<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct Conectado {
+    agregadas: Vec<String>,
+    red: Red,
+    copia: Option<String>,
+}
+
+const SIN_LISTA_PARA_CONECTAR: &str = "No encontré la lista de bibliotecas de Resolve en este equipo: abre Resolve una vez, ciérralo y vuelve a pulsar.";
+const ABIERTO_PARA_CONECTAR: &str = "Resolve está abierto: ciérralo y vuelve a pulsar.";
+
+/// Un usuario de PostgreSQL como los del panel del NAS: letras, números, «_», «.» y «-».
+pub(crate) fn rol_valido(r: &str) -> bool {
+    (1..=63).contains(&r.len()) && r.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// Una clave que cabe en una línea de la lista: sin «:» (separa los campos) ni saltos.
+pub(crate) fn clave_valida(c: &str) -> bool {
+    !c.is_empty() && c.len() <= 200 && !c.chars().any(|x| x == ':' || x.is_control())
+}
+
+/// Cómo se comprueba la clave: (dirección, usuario, clave, biblioteca). En las pruebas, una de mentira.
+type Entrar<'a> = &'a dyn Fn(&str, &str, &str, &str) -> Result<(), String>;
+
+/// Entra al servidor de Resolve con ese usuario y esa clave, a esa biblioteca, y sale. Solo comprueba.
+fn entrar_al_servidor(ip: &str, rol: &str, clave: &str, base: &str) -> Result<(), String> {
+    use postgres::error::SqlState;
+    let mut cfg = postgres::Config::new();
+    cfg.host(ip)
+        .port(PUERTO_POSTGRES)
+        .user(rol)
+        .password(clave)
+        .dbname(base)
+        .application_name("Labstream OS")
+        .connect_timeout(espera_de(ip) * 2);
+    let base = base.to_string();
+    // En su propio hilo: el cliente trae su reloj (un runtime) y aquí ya hay uno.
+    std::thread::spawn(move || match cfg.connect(postgres::NoTls) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(match e.code() {
+            Some(c) if *c == SqlState::INVALID_PASSWORD || *c == SqlState::INVALID_AUTHORIZATION_SPECIFICATION => {
+                "El usuario o la clave no son los de Resolve: revísalos y vuelve a pulsar.".to_string()
+            }
+            Some(c) if *c == SqlState::INVALID_CATALOG_NAME => format!("La biblioteca «{base}» ya no está en el servidor de Resolve: vuelve a pulsar."),
+            Some(c) if *c == SqlState::INSUFFICIENT_PRIVILEGE => format!("Ese usuario no entra a la biblioteca «{base}»: pídele el acceso a un administrador."),
+            Some(c) if *c == SqlState::TOO_MANY_CONNECTIONS => "El servidor de Resolve no admite más conexiones ahora: inténtalo en un momento.".to_string(),
+            Some(_) => "El servidor de Resolve no dejó entrar con ese usuario.".to_string(),
+            None => "No pude llegar al servidor de Resolve para comprobar la clave: revisa la red y vuelve a pulsar.".to_string(),
+        }),
+    })
+    .join()
+    .unwrap_or_else(|_| Err("No pude comprobar la clave con el servidor de Resolve.".into()))
+}
+
+fn conectar(
+    ruta: Option<PathBuf>,
+    vistas_en: Option<&Path>,
+    c: Conexion,
+    modo: Modo,
+    abierto: fn() -> bool,
+    llega: &dyn Fn(&str) -> bool,
+    entra: Entrar,
+) -> Result<Conectado, String> {
+    if modo == Modo::Apagado {
+        return Err(APAGADO.into());
+    }
+    let rol = c.rol.trim().to_string();
+    if !rol_valido(&rol) {
+        return Err("Ese usuario de Resolve no vale: solo lleva letras, números, «_», «.» y «-».".into());
+    }
+    if c.clave.is_empty() {
+        return Err("Falta la clave.".into());
+    }
+    if !clave_valida(&c.clave) {
+        return Err("Esa clave no cabe en la lista de Resolve (lleva «:» o un salto de línea): hay que cambiarla en el panel del NAS.".into());
+    }
+    let ruta = ruta.ok_or("Este sistema no tiene la lista de Resolve.")?;
+    let actual = match std::fs::read_to_string(&ruta) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(SIN_LISTA_PARA_CONECTAR.into()),
+        Err(e) => return Err(format!("No pude leer la lista de Resolve: {e}")),
+    };
+    let lineas: Vec<Linea> = actual.lines().filter_map(leer_linea).collect();
+    if lineas.iter().any(|l| l.rol == rol) {
+        return Err(format!("Este equipo ya tiene bibliotecas de «{rol}»: las demás le llegan solas."));
+    }
+    let ya: BTreeSet<&str> = lineas.iter().map(|l| l.base.as_str()).collect();
+    let mut nuevas: Vec<String> = Vec::new();
+    for b in c.bibliotecas.iter().take(50) {
+        if nombre_valido(b) && !ya.contains(b.as_str()) && !nuevas.contains(b) {
+            nuevas.push(b.clone());
+        }
+    }
+    if nuevas.is_empty() {
+        return Err("No hay ninguna biblioteca que añadir para ese usuario.".into());
+    }
+    if abierto() {
+        return Err(ABIERTO_PARA_CONECTAR.into());
+    }
+    let (oficina, zerotier) = SERVIDOR;
+    let red = match modo {
+        Modo::Oficina => Some(Red::Oficina),
+        Modo::Zerotier => Some(Red::Zerotier),
+        _ => {
+            let en_oficina = llega(oficina);
+            red_de(en_oficina, !en_oficina && llega(zerotier))
+        }
+    }
+    .ok_or("Este equipo no llega al servidor de Resolve ni por la red de la oficina ni por ZeroTier: conéctate a una de las dos y vuelve a pulsar.")?;
+    let ip = if red == Red::Oficina { oficina } else { zerotier };
+
+    // La clave, comprobada contra el servidor ANTES de tocar la lista.
+    entra(ip, &rol, &c.clave, &nuevas[0])?;
+
+    let copia = copiar_lista(&ruta)?;
+    // Última comprobación justo antes de escribir: si Resolve se abrió mientras tanto, nada.
+    if abierto() {
+        return Err(ABIERTO_PARA_CONECTAR.into());
+    }
+    let texto: Vec<String> = nuevas.iter().map(|b| escribir_linea(b, ip, &rol, &c.clave)).collect();
+    let mut f = std::fs::OpenOptions::new().append(true).open(&ruta).map_err(|e| format!("No pude abrir la lista de Resolve: {e}"))?;
+    f.write_all(texto_a_anadir(&actual, &texto).as_bytes()).map_err(|e| format!("No pude escribir en la lista de Resolve: {e}"))?;
+    let _ = f.sync_all();
+
+    let mut v = leer_vistas(vistas_en);
+    v.vistas.extend(nuevas.iter().cloned());
+    guardar_vistas(vistas_en, &v);
+    Ok(Conectado { agregadas: nuevas, red, copia: copia.file_name().and_then(|n| n.to_str()).map(String::from) })
+}
+
+#[tauri::command]
+pub async fn resolve_lista_conectar<R: Runtime>(app: AppHandle<R>, conexion: Conexion) -> Result<Conectado, String> {
+    let m = modo(&app);
+    let vistas = ruta_vistas(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _g = CANDADO.lock().unwrap_or_else(|e| e.into_inner());
+        conectar(ruta_lista(), vistas.as_deref(), conexion, m, resolve_abierto, &llega, &entrar_al_servidor)
+    })
+    .await
+    .map_err(|e| format!("No pude conectar este equipo: {e}"))?
 }
 
 #[derive(Serialize)]
@@ -1211,6 +1387,129 @@ mod pruebas {
         assert!(agregar(Some(lista.clone()), Some(&vistas), ajeno, cerrado).is_err());
         assert_eq!(std::fs::read_to_string(&lista).unwrap(), LISTA);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ── Conectar este equipo (1.41) ──
+
+    const SOLO_LOCAL: &str = "Local Database:C/x:y:z:w:DISK\r\n";
+    fn cx(rol: &str, clave: &str, b: &[&str]) -> Conexion {
+        Conexion { rol: rol.into(), clave: clave.into(), bibliotecas: b.iter().map(|s| s.to_string()).collect() }
+    }
+    fn entra_bien(_ip: &str, _rol: &str, _clave: &str, _base: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn clave_mala(_ip: &str, _rol: &str, _clave: &str, _base: &str) -> Result<(), String> {
+        Err("El usuario o la clave no son los de Resolve.".into())
+    }
+    fn en_oficina(ip: &str) -> bool {
+        ip == SERVIDOR.0
+    }
+    fn solo_zerotier(ip: &str) -> bool {
+        ip == SERVIDOR.1
+    }
+    fn sin_red(_ip: &str) -> bool {
+        false
+    }
+
+    #[test]
+    fn usuario_y_clave_que_caben_en_la_lista() {
+        assert!(rol_valido("camilo") && rol_valido("ana.b-1_x") && !rol_valido("") && !rol_valido("a b") && !rol_valido("a:b") && !rol_valido(&"x".repeat(64)));
+        assert!(clave_valida("Cl4ve-con espacios y ñ") && !clave_valida("") && !clave_valida("a:b") && !clave_valida("a\nb") && !clave_valida(&"x".repeat(201)));
+    }
+
+    #[test]
+    fn mirar_dice_si_el_equipo_se_puede_conectar() {
+        let d = carpeta("conectable");
+        let lista = d.join("dblist.conf");
+        // Sin lista no: no se inventa una. Con la lista y sin bibliotecas de red, sí. Con alguna, ya no hace falta.
+        assert!(!mirar(Some(lista.clone()), None, cerrado).conectable);
+        std::fs::write(&lista, SOLO_LOCAL).unwrap();
+        let e = mirar(Some(lista.clone()), None, cerrado);
+        assert!(!e.disponible && e.conectable && e.motivo.as_deref() == Some(SIN_RED_CONECTABLE));
+        assert!(mirar(Some(lista.clone()), None, abierto).abierto);
+        std::fs::write(&lista, LISTA).unwrap();
+        let e = mirar(Some(lista.clone()), None, cerrado);
+        assert!(e.disponible && !e.conectable);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn conecta_el_equipo_comprobando_la_clave_y_por_donde_llega() {
+        let d = carpeta("conectar");
+        let (lista, vistas) = (d.join("dblist.conf"), d.join("vistas.json"));
+        std::fs::write(&lista, SOLO_LOCAL).unwrap();
+        let (of, zt) = SERVIDOR;
+
+        // La clave se comprueba contra el servidor por la dirección elegida, con la primera biblioteca.
+        let visto = std::sync::Mutex::new(Vec::<String>::new());
+        let apunta = |ip: &str, rol: &str, clave: &str, base: &str| -> Result<(), String> {
+            visto.lock().unwrap().push(format!("{ip}|{rol}|{clave}|{base}"));
+            Ok(())
+        };
+        let r = conectar(Some(lista.clone()), Some(&vistas), cx(" jaime ", "s3creta", &["PepsiCo", "UBER", "a:b", "UBER", "postgres"]), Modo::Auto, cerrado, &en_oficina, &apunta).unwrap();
+        assert_eq!(r.agregadas, vec!["PepsiCo".to_string(), "UBER".to_string()]);
+        assert_eq!(r.red, Red::Oficina);
+        assert_eq!(*visto.lock().unwrap(), vec![format!("{of}|jaime|s3creta|PepsiCo")]);
+        let texto = std::fs::read_to_string(&lista).unwrap();
+        assert_eq!(texto, format!("{SOLO_LOCAL}PepsiCo{of}:{of}:jaime:s3creta:PepsiCo:QPSQL\r\nUBER{of}:{of}:jaime:s3creta:UBER:QPSQL\r\n"));
+        assert_eq!(std::fs::read_to_string(d.join(r.copia.unwrap())).unwrap(), SOLO_LOCAL);
+        // Quedan vistas, y lo que venga después ya llega solo, copiando de estas líneas.
+        assert!(std::fs::read_to_string(&vistas).unwrap().contains("UBER"));
+        let paso = Paso { rol: "jaime".into(), ip: of.into(), bibliotecas: vec!["Nueva".into()], forzar: false };
+        assert_eq!(agregar(Some(lista.clone()), Some(&vistas), paso, cerrado).unwrap().agregadas, vec!["Nueva".to_string()]);
+        assert!(std::fs::read_to_string(&lista).unwrap().ends_with(&format!("Nueva{of}:{of}:jaime:s3creta:Nueva:QPSQL\r\n")));
+        // Ese usuario ya está: no se conecta dos veces (ni se mezclan dos claves).
+        assert!(conectar(Some(lista.clone()), Some(&vistas), cx("jaime", "otra", &["Mas"]), Modo::Auto, cerrado, &en_oficina, &entra_bien).unwrap_err().contains("ya tiene bibliotecas"));
+
+        // Fuera de la oficina entra por ZeroTier; elegido a mano, por la elegida aunque la otra responda.
+        std::fs::write(&lista, SOLO_LOCAL).unwrap();
+        let r = conectar(Some(lista.clone()), None, cx("jaime", "s3creta", &["PepsiCo"]), Modo::Auto, cerrado, &solo_zerotier, &entra_bien).unwrap();
+        assert_eq!(r.red, Red::Zerotier);
+        assert!(std::fs::read_to_string(&lista).unwrap().ends_with(&format!("PepsiCo{zt}:{zt}:jaime:s3creta:PepsiCo:QPSQL\r\n")));
+        std::fs::write(&lista, SOLO_LOCAL).unwrap();
+        assert_eq!(conectar(Some(lista.clone()), None, cx("jaime", "s3creta", &["PepsiCo"]), Modo::Zerotier, cerrado, &en_oficina, &entra_bien).unwrap().red, Red::Zerotier);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn sin_poder_conectar_la_lista_no_se_toca() {
+        let d = carpeta("conectar-no");
+        let lista = d.join("dblist.conf");
+        std::fs::write(&lista, SOLO_LOCAL).unwrap();
+        let intacta = || assert_eq!(std::fs::read_to_string(&lista).unwrap(), SOLO_LOCAL);
+        let con = |c: Conexion, modo: Modo, ab: fn() -> bool, llega: fn(&str) -> bool, entra: fn(&str, &str, &str, &str) -> Result<(), String>| {
+            conectar(Some(lista.clone()), None, c, modo, ab, &llega, &entra).unwrap_err()
+        };
+        // La clave mal escrita: lo dice el servidor y no queda ni una línea.
+        assert!(con(cx("jaime", "mala", &["PepsiCo"]), Modo::Auto, cerrado, en_oficina, clave_mala).contains("no son los de Resolve"));
+        intacta();
+        // Resolve abierto, sin red, apagado, o datos que no caben en la lista.
+        assert!(con(cx("jaime", "s3creta", &["PepsiCo"]), Modo::Auto, abierto, en_oficina, entra_bien).contains("Resolve está abierto"));
+        assert!(con(cx("jaime", "s3creta", &["PepsiCo"]), Modo::Auto, cerrado, sin_red, entra_bien).contains("no llega al servidor"));
+        assert!(con(cx("jaime", "s3creta", &["PepsiCo"]), Modo::Apagado, cerrado, en_oficina, entra_bien).contains("apagado"));
+        assert!(con(cx("ja ime", "s3creta", &["PepsiCo"]), Modo::Auto, cerrado, en_oficina, entra_bien).contains("usuario"));
+        assert!(con(cx("jaime", "", &["PepsiCo"]), Modo::Auto, cerrado, en_oficina, entra_bien).contains("Falta la clave"));
+        assert!(con(cx("jaime", "a:b", &["PepsiCo"]), Modo::Auto, cerrado, en_oficina, entra_bien).contains("no cabe"));
+        assert!(con(cx("jaime", "s3creta", &["a:b", "postgres"]), Modo::Auto, cerrado, en_oficina, entra_bien).contains("ninguna biblioteca"));
+        intacta();
+        // Sin lista no se inventa una: se pide abrir Resolve una vez.
+        assert_eq!(conectar(Some(d.join("no-esta.conf")), None, cx("jaime", "s3creta", &["PepsiCo"]), Modo::Auto, cerrado, &en_oficina, &entra_bien).unwrap_err(), SIN_LISTA_PARA_CONECTAR);
+        assert!(!d.join("no-esta.conf").exists());
+        // La clave no sale en lo que vuelve a la página.
+        std::fs::write(&lista, SOLO_LOCAL).unwrap();
+        let r = conectar(Some(lista.clone()), None, cx("jaime", "s3creta", &["PepsiCo"]), Modo::Auto, cerrado, &en_oficina, &entra_bien).unwrap();
+        assert!(!serde_json::to_string(&r).unwrap().contains("s3creta"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Contra el servidor de verdad (en la red de la oficina): `cargo test --lib -- --ignored el_servidor_de_verdad`.
+    /// Un usuario que no existe y una clave inventada: el servidor tiene que decir que no, y nada más.
+    #[test]
+    #[ignore]
+    fn el_servidor_de_verdad_rechaza_un_usuario_inventado() {
+        let ip = if llega(SERVIDOR.0) { SERVIDOR.0 } else { SERVIDOR.1 };
+        let e = entrar_al_servidor(ip, "ls_prueba_no_existe", "no-es-una-clave", "postgres").unwrap_err();
+        assert!(e.contains("no son los de Resolve") || e.contains("no dejó entrar"), "{e}");
     }
 
     // ── Dónde está la lista (1.40.2) ──
